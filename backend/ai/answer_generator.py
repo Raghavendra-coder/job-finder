@@ -1,22 +1,18 @@
 from __future__ import annotations
 
-from openai import AsyncOpenAI
+import httpx
 
-from backend.config import OPENAI_API_KEY, OPENAI_MODEL
+from backend.config import OLLAMA_BASE_URL, OLLAMA_MODEL
 from backend.logger import logger
 from backend.models import ResumeData
 
-_client: AsyncOpenAI | None = None
+_client: httpx.AsyncClient | None = None
 
 
-def _get_client() -> AsyncOpenAI:
+def _get_client() -> httpx.AsyncClient:
     global _client
     if _client is None:
-        if not OPENAI_API_KEY:
-            raise RuntimeError(
-                "OPENAI_API_KEY is not set. Add it to your .env file."
-            )
-        _client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+        _client = httpx.AsyncClient(base_url=OLLAMA_BASE_URL, timeout=90.0)
     return _client
 
 
@@ -72,17 +68,10 @@ async def generate_answer(
     )
 
     try:
-        client = _get_client()
-        response = await client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_message},
-            ],
-            max_tokens=300,
+        answer = await _chat_completion(
+            user_message=user_message,
             temperature=0.4,
         )
-        answer = response.choices[0].message.content or ""
         logger.info("AI answer generated (%d chars)", len(answer))
         return answer.strip()
     except Exception as exc:
@@ -103,17 +92,29 @@ async def generate_cover_summary(
     )
 
     try:
-        client = _get_client()
-        response = await client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=200,
+        return await _chat_completion(
+            user_message=prompt,
             temperature=0.5,
         )
-        return (response.choices[0].message.content or "").strip()
     except Exception as exc:
         logger.error("Cover summary generation failed: %s", exc)
         return ""
+
+
+async def _chat_completion(user_message: str, temperature: float) -> str:
+    client = _get_client()
+    response = await client.post(
+        "/api/chat",
+        json={
+            "model": OLLAMA_MODEL,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
+            "stream": False,
+            "options": {"temperature": temperature},
+        },
+    )
+    response.raise_for_status()
+    payload = response.json()
+    return (payload.get("message", {}).get("content") or "").strip()

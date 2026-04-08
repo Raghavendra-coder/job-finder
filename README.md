@@ -8,7 +8,7 @@ An AI-powered system that crawls job portals (LinkedIn, Indeed, Naukri), matches
 - **Job Crawling** — Playwright-based crawlers for LinkedIn, Indeed, and Naukri
 - **Smart Matching** — Scores jobs based on skill overlap and experience relevance
 - **Auto Apply** — Fills application forms, uploads resume, answers screening questions with AI
-- **AI Answers** — Uses OpenAI GPT to generate optimized screening question answers
+- **AI Answers** — Uses local Ollama models to generate optimized screening question answers
 - **Session Management** — Persists login cookies, handles manual login fallback
 - **Dashboard** — Real-time status, logs, and application tracking
 - **Human-like Behavior** — Random delays, realistic user agent, non-headless browser
@@ -19,7 +19,7 @@ An AI-powered system that crawls job portals (LinkedIn, Indeed, Naukri), matches
 job-search-ai/
 ├── backend/
 │   ├── ai/
-│   │   ├── answer_generator.py   # OpenAI-powered answer generation
+│   │   ├── answer_generator.py   # Ollama-powered answer generation
 │   │   ├── jd_analyzer.py        # Job description analysis
 │   │   └── job_matcher.py        # Resume-to-job scoring
 │   ├── auth/
@@ -48,7 +48,8 @@ job-search-ai/
 ## Prerequisites
 
 - Python 3.11+
-- An OpenAI API key (for AI-generated answers)
+- Ollama installed locally
+- `gemma4` model pulled in Ollama
 - Accounts on the job portals you want to use
 
 ## Setup
@@ -98,12 +99,19 @@ copy .env.example .env
 Edit `.env` with your credentials:
 
 ```env
-OPENAI_API_KEY=sk-your-key-here
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=gemma4
 LINKEDIN_EMAIL=you@example.com
 LINKEDIN_PASSWORD=your-password
 APPLICANT_NAME=Your Name
 APPLICANT_EMAIL=you@example.com
 APPLICANT_PHONE=+1234567890
+```
+
+Pull the model once:
+
+```bash
+ollama pull gemma4
 ```
 
 ## Running
@@ -161,8 +169,8 @@ All settings are in `.env`:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `OPENAI_API_KEY` | OpenAI API key for answer generation | — |
-| `OPENAI_MODEL` | Model to use | `gpt-4o-mini` |
+| `OLLAMA_BASE_URL` | Local Ollama server URL | `http://localhost:11434` |
+| `OLLAMA_MODEL` | Ollama model used for answer generation | `gemma4` |
 | `MATCH_THRESHOLD` | Minimum match score to apply (0.0-1.0) | `0.5` |
 | `MIN_DELAY` / `MAX_DELAY` | Random delay range in seconds | `2` / `5` |
 | `PROXY_URL` | HTTP proxy for browser (optional) | — |

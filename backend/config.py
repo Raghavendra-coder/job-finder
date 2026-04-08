@@ -17,9 +17,9 @@ SESSIONS_DIR = BASE_DIR / "sessions"
 for d in (UPLOADS_DIR, LOGS_DIR, SESSIONS_DIR):
     d.mkdir(exist_ok=True)
 
-# --- OpenAI -----------------------------------------------------------------
-OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+# --- Ollama -----------------------------------------------------------------
+OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "gemma4")
 
 # --- Portal credentials -----------------------------------------------------
 LINKEDIN_EMAIL: str = os.getenv("LINKEDIN_EMAIL", "")
