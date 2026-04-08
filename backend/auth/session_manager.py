@@ -8,6 +8,8 @@ from typing import Optional
 from playwright.async_api import BrowserContext, Page, async_playwright
 
 from backend.config import (
+    BROWSER_CONNECT_OVER_CDP,
+    CHROME_CDP_URL,
     INDEED_EMAIL,
     INDEED_PASSWORD,
     LINKEDIN_EMAIL,
@@ -36,22 +38,30 @@ PORTAL_CREDENTIALS = {
 
 _playwright_instance = None
 _browser = None
+_managed_context_ids: set[int] = set()
+_is_cdp_connection = False
 
 
 async def get_browser():
-    global _playwright_instance, _browser
+    global _playwright_instance, _browser, _is_cdp_connection
     if _browser is None:
         _playwright_instance = await async_playwright().start()
-        launch_args: dict = {
-            "headless": False,
-            "args": [
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-            ],
-        }
-        if PROXY_URL:
-            launch_args["proxy"] = {"server": PROXY_URL}
-        _browser = await _playwright_instance.chromium.launch(**launch_args)
+        if BROWSER_CONNECT_OVER_CDP:
+            logger.info("Connecting to existing Chrome over CDP: %s", CHROME_CDP_URL)
+            _browser = await _playwright_instance.chromium.connect_over_cdp(CHROME_CDP_URL)
+            _is_cdp_connection = True
+        else:
+            launch_args: dict = {
+                "headless": False,
+                "args": [
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                ],
+            }
+            if PROXY_URL:
+                launch_args["proxy"] = {"server": PROXY_URL}
+            _browser = await _playwright_instance.chromium.launch(**launch_args)
+            _is_cdp_connection = False
     return _browser
 
 
@@ -82,6 +92,11 @@ async def load_cookies(context: BrowserContext, portal: JobPortal) -> bool:
 
 async def create_context(portal: JobPortal) -> BrowserContext:
     browser = await get_browser()
+    if BROWSER_CONNECT_OVER_CDP and browser.contexts:
+        # Reuse the existing Chrome profile context so saved sessions are available.
+        context = browser.contexts[0]
+        return context
+
     context = await browser.new_context(
         viewport={"width": 1280, "height": 800},
         user_agent=(
@@ -91,8 +106,13 @@ async def create_context(portal: JobPortal) -> BrowserContext:
         ),
         locale="en-US",
     )
+    _managed_context_ids.add(id(context))
     await load_cookies(context, portal)
     return context
+
+
+def is_managed_context(context: BrowserContext) -> bool:
+    return id(context) in _managed_context_ids
 
 
 async def human_delay(min_s: float | None = None, max_s: float | None = None) -> None:
@@ -117,6 +137,14 @@ async def _is_logged_in(page: Page, portal: JobPortal) -> bool:
 
 async def login_linkedin(page: Page) -> bool:
     email, password = PORTAL_CREDENTIALS[JobPortal.LINKEDIN]
+
+    # In CDP/shared-profile mode, user may already be logged in.
+    await page.goto("https://www.linkedin.com/jobs/", wait_until="domcontentloaded")
+    await human_delay(1, 2)
+    if await _is_logged_in(page, JobPortal.LINKEDIN):
+        logger.info("LinkedIn session already active")
+        return True
+
     if not email or not password:
         logger.warning("LinkedIn credentials not set — pausing for manual login")
         return await _wait_for_manual_login(page, JobPortal.LINKEDIN)
@@ -124,9 +152,19 @@ async def login_linkedin(page: Page) -> bool:
     await page.goto(PORTAL_URLS[JobPortal.LINKEDIN], wait_until="domcontentloaded")
     await human_delay(1, 2)
 
-    await page.fill("#username", email)
+    username_input = page.locator("#username").first
+    password_input = page.locator("#password").first
+    if not await username_input.is_visible():
+        # Login form isn't visible; likely already authenticated or page layout differs.
+        if await _is_logged_in(page, JobPortal.LINKEDIN):
+            logger.info("LinkedIn already logged in after redirect")
+            return True
+        logger.warning("LinkedIn login form not visible — waiting for manual login")
+        return await _wait_for_manual_login(page, JobPortal.LINKEDIN)
+
+    await username_input.fill(email)
     await human_delay(0.5, 1)
-    await page.fill("#password", password)
+    await password_input.fill(password)
     await human_delay(0.5, 1)
     await page.click('button[type="submit"]')
     await human_delay(3, 5)
@@ -233,10 +271,13 @@ async def ensure_logged_in(page: Page, portal: JobPortal) -> bool:
 
 
 async def close_browser() -> None:
-    global _browser, _playwright_instance
+    global _browser, _playwright_instance, _managed_context_ids, _is_cdp_connection
     if _browser:
+        # In CDP mode this detaches Playwright from the browser connection.
         await _browser.close()
         _browser = None
+    _managed_context_ids = set()
+    _is_cdp_connection = False
     if _playwright_instance:
         await _playwright_instance.stop()
         _playwright_instance = None

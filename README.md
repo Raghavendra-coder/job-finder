@@ -101,6 +101,8 @@ Edit `.env` with your credentials:
 ```env
 OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_MODEL=gemma4
+BROWSER_CONNECT_OVER_CDP=false
+CHROME_CDP_URL=http://localhost:9222
 LINKEDIN_EMAIL=you@example.com
 LINKEDIN_PASSWORD=your-password
 APPLICANT_NAME=Your Name
@@ -171,9 +173,31 @@ All settings are in `.env`:
 |----------|-------------|---------|
 | `OLLAMA_BASE_URL` | Local Ollama server URL | `http://localhost:11434` |
 | `OLLAMA_MODEL` | Ollama model used for answer generation | `gemma4` |
+| `BROWSER_CONNECT_OVER_CDP` | Connect Playwright to an existing Chrome window | `false` |
+| `CHROME_CDP_URL` | Chrome DevTools endpoint when CDP mode is enabled | `http://localhost:9222` |
 | `MATCH_THRESHOLD` | Minimum match score to apply (0.0-1.0) | `0.5` |
 | `MIN_DELAY` / `MAX_DELAY` | Random delay range in seconds | `2` / `5` |
 | `PROXY_URL` | HTTP proxy for browser (optional) | — |
+
+### Use Existing Chrome Window (CDP mode)
+
+If you want login tabs to open in a Chrome window that is already running, start Chrome with remote debugging enabled and turn on CDP mode:
+
+1. Start Chrome with debugging:
+   - macOS:
+     ```bash
+     /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222
+     ```
+   - Windows:
+     ```bash
+     "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222
+     ```
+2. Set in `.env`:
+   ```env
+   BROWSER_CONNECT_OVER_CDP=true
+   CHROME_CDP_URL=http://localhost:9222
+   ```
+3. Start the app. Playwright will attach to that Chrome instance and open tabs there instead of a separate browser process.
 
 ## Authentication Handling
 

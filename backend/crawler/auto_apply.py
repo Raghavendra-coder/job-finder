@@ -7,7 +7,12 @@ from typing import Callable, Optional
 from playwright.async_api import Page
 
 from backend.ai.answer_generator import generate_answer
-from backend.auth.session_manager import create_context, human_delay, save_cookies
+from backend.auth.session_manager import (
+    create_context,
+    human_delay,
+    is_managed_context,
+    save_cookies,
+)
 from backend.config import APPLICANT_EMAIL, APPLICANT_NAME, APPLICANT_PHONE
 from backend.logger import log_event, logger
 from backend.models import ApplicationLog, JobListing, JobPortal, ResumeData, WorkMode
@@ -70,8 +75,10 @@ class AutoApplyBot:
                         detail=app_log.error or "unknown",
                     )
             finally:
-                await save_cookies(ctx, job.portal)
-                await ctx.close()
+                await page.close()
+                if is_managed_context(ctx):
+                    await save_cookies(ctx, job.portal)
+                    await ctx.close()
 
         except Exception as exc:
             app_log.status = "error"
@@ -89,6 +96,10 @@ class AutoApplyBot:
     async def _apply_linkedin(
         self, page: Page, job: JobListing, app_log: ApplicationLog,
     ) -> bool:
+        if "linkedin.com/jobs/view" not in job.url:
+            app_log.error = "not_linkedin_easy_apply_url"
+            return False
+
         await page.goto(job.url, wait_until="domcontentloaded")
         await human_delay(2, 3)
 

@@ -22,6 +22,7 @@ class LinkedInCrawler(BaseCrawler):
         params = [
             f"keywords={quote_plus(self.search_query)}",
             "f_JT=F",  # Full-time only
+            "f_AL=true",  # Easy Apply only
         ]
         if self.location:
             params.append(f"location={quote_plus(self.location)}")
@@ -55,6 +56,8 @@ class LinkedInCrawler(BaseCrawler):
 
             for card in cards:
                 try:
+                    if not await self._is_easy_apply_card(card):
+                        continue
                     job = await self._parse_card(card)
                     if job:
                         jobs.append(job)
@@ -88,6 +91,12 @@ class LinkedInCrawler(BaseCrawler):
         href = await title_el.get_attribute("href") or ""
         if href and not href.startswith("http"):
             href = "https://www.linkedin.com" + href
+        if not href:
+            job_id = await card.get_attribute("data-job-id") or ""
+            if job_id:
+                href = f"https://www.linkedin.com/jobs/view/{job_id}/"
+        if not href:
+            return None
 
         company_el = await card.query_selector(
             ".job-card-container__primary-description, "
@@ -113,6 +122,11 @@ class LinkedInCrawler(BaseCrawler):
             work_mode=work_mode,
             job_type="Full-time",
         )
+
+    @staticmethod
+    async def _is_easy_apply_card(card) -> bool:
+        text = (await card.inner_text()).lower()
+        return "easy apply" in text
 
     @staticmethod
     def _detect_work_mode(text: str) -> WorkMode:

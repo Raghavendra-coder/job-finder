@@ -5,7 +5,11 @@ from backend.logger import logger
 from backend.models import JobListing, ResumeData
 
 
-def compute_match_score(resume: ResumeData, job: JobListing) -> float:
+def compute_match_score(
+    resume: ResumeData,
+    job: JobListing,
+    target_skills: set[str] | None = None,
+) -> float:
     """
     Score between 0.0 and 1.0 reflecting how well a resume matches a job.
     Combines skill overlap and keyword presence in experience text.
@@ -14,7 +18,13 @@ def compute_match_score(resume: ResumeData, job: JobListing) -> float:
     job_skills = set(extract_required_skills(job.description))
 
     if not job_skills:
-        # If we can't extract skills from the JD, fall back to title keywords
+        # LinkedIn cards may not include a JD snippet. Fall back to the user's target
+        # skill set extracted from the search prompt/JD.
+        if target_skills:
+            overlap = resume_skills & target_skills
+            return min(len(overlap) / max(len(target_skills), 1), 1.0)
+
+        # Final fallback: title keyword overlap.
         title_words = {w.lower() for w in job.title.split()}
         overlap = title_words & resume_skills
         return min(len(overlap) / max(len(title_words), 1), 1.0)
@@ -36,10 +46,12 @@ def filter_and_score_jobs(
     resume: ResumeData,
     jobs: list[JobListing],
     threshold: float = 0.5,
+    search_context: str = "",
 ) -> list[JobListing]:
     scored: list[JobListing] = []
+    target_skills = set(extract_required_skills(search_context))
     for job in jobs:
-        score = compute_match_score(resume, job)
+        score = compute_match_score(resume, job, target_skills=target_skills)
         job.match_score = score
         if score >= threshold:
             scored.append(job)

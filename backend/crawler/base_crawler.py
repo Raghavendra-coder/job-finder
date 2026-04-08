@@ -9,6 +9,7 @@ from backend.auth.session_manager import (
     create_context,
     ensure_logged_in,
     human_delay,
+    is_managed_context,
     save_cookies,
 )
 from backend.logger import log_event, logger
@@ -63,8 +64,9 @@ class BaseCrawler(abc.ABC):
 
     async def teardown(self) -> None:
         if self._context:
-            await save_cookies(self._context, self.portal)
-            await self._context.close()
+            if is_managed_context(self._context):
+                await save_cookies(self._context, self.portal)
+                await self._context.close()
             self._context = None
             self._page = None
 

@@ -8,7 +8,11 @@ from typing import Any
 from fastapi import APIRouter, File, Form, UploadFile
 from fastapi.responses import JSONResponse
 
-from backend.ai.jd_analyzer import analyze_job_description
+from backend.ai.jd_analyzer import (
+    analyze_job_description,
+    extract_required_skills,
+    extract_role_keywords,
+)
 from backend.ai.job_matcher import filter_and_score_jobs
 from backend.auth.session_manager import close_browser
 from backend.config import MATCH_THRESHOLD, UPLOADS_DIR
@@ -43,6 +47,17 @@ def _get_session(session_id: str) -> SearchSession:
     if session_id not in _sessions:
         _sessions[session_id] = SearchSession(session_id=session_id)
     return _sessions[session_id]
+
+
+def _build_search_query(job_description: str) -> str:
+    skills = extract_required_skills(job_description)
+    roles = extract_role_keywords(job_description)
+    query_parts = (roles[:3] + skills[:5])
+    if query_parts:
+        return " ".join(dict.fromkeys(query_parts))
+
+    first_line = job_description.splitlines()[0] if job_description.strip() else ""
+    return first_line[:80] or job_description[:80]
 
 
 @router.post("/upload-resume")
@@ -137,6 +152,8 @@ async def _run_search(
         session.logs.append("Resume parsed")
 
         all_jobs: list[JobListing] = []
+        search_query = _build_search_query(request.job_description)
+        session.logs.append(f"Search query: {search_query}")
 
         for portal in request.portals:
             crawler_cls = CRAWLER_MAP.get(portal)
@@ -148,7 +165,7 @@ async def _run_search(
                 s.logs.append(msg)
 
             crawler = crawler_cls(
-                search_query=request.job_description[:100],
+                search_query=search_query,
                 work_modes=request.work_modes,
                 on_status=_on_status,
             )
@@ -158,7 +175,12 @@ async def _run_search(
 
         session.logs.append(f"Total jobs found: {len(all_jobs)}")
 
-        matched = filter_and_score_jobs(resume_data, all_jobs, MATCH_THRESHOLD)
+        matched = filter_and_score_jobs(
+            resume_data,
+            all_jobs,
+            MATCH_THRESHOLD,
+            search_context=request.job_description,
+        )
         session.logs.append(f"Jobs matching threshold: {len(matched)}")
 
         apply_limit = min(request.max_applications, len(matched))
