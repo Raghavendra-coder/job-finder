@@ -102,20 +102,44 @@ class AutoApplyBot:
 
         await page.goto(job.url, wait_until="domcontentloaded")
         await human_delay(2, 3)
+        try:
+            await page.wait_for_load_state("networkidle", timeout=7000)
+        except Exception:
+            pass
+        await page.evaluate("window.scrollTo(0, 0)")
+        await human_delay(0.3, 0.7)
 
-        apply_btn = page.locator(
-            "button.jobs-apply-button, "
-            "button[aria-label*='Easy Apply'], "
-            "button:has-text('Easy Apply')"
-        ).first
+        if "linkedin.com/jobs/view" not in page.url.lower():
+            app_log.error = "linkedin_redirected_from_job_page"
+            return False
 
-        if not await apply_btn.is_visible():
+        apply_btn = await self._find_linkedin_easy_apply_button(page)
+        if apply_btn is None:
+            clicked = await self._force_click_easy_apply_by_text(page)
+            if not clicked:
+                await self._emit("No Easy Apply button found — external application")
+                app_log.error = "external_application"
+                return False
+        else:
+            try:
+                await apply_btn.scroll_into_view_if_needed()
+                await human_delay(0.2, 0.5)
+                await apply_btn.click(timeout=3000)
+            except Exception:
+                clicked = await self._force_click_easy_apply_by_text(page)
+                if not clicked:
+                    await self._emit("No Easy Apply button found — external application")
+                    app_log.error = "external_application"
+                    return False
+
+        await human_delay(1, 2)
+
+        # Confirm we actually entered the modal/flow after click.
+        in_apply_flow = await self._in_linkedin_apply_flow(page)
+        if not in_apply_flow:
             await self._emit("No Easy Apply button found — external application")
             app_log.error = "external_application"
             return False
-
-        await apply_btn.click()
-        await human_delay(1, 2)
 
         max_steps = 10
         for step in range(max_steps):
@@ -146,6 +170,82 @@ class AutoApplyBot:
 
         app_log.error = "form_navigation_stuck"
         return False
+
+    async def _find_linkedin_easy_apply_button(self, page: Page):
+        selectors = [
+            "button.jobs-apply-button",
+            "button.jobs-apply-button--top-card",
+            "button[aria-label*='Easy Apply']",
+            "button:has-text('Easy Apply')",
+            "[data-control-name='jobdetails_topcard_inapply']",
+        ]
+        for sel in selectors:
+            btn = page.locator(sel).first
+            try:
+                if await btn.is_visible(timeout=1500):
+                    return btn
+            except Exception:
+                continue
+
+        role_btn = page.get_by_role("button", name="Easy Apply").first
+        try:
+            if await role_btn.is_visible(timeout=1500):
+                return role_btn
+        except Exception:
+            pass
+
+        all_buttons = page.locator("button")
+        count = await all_buttons.count()
+        for i in range(min(count, 60)):
+            btn = all_buttons.nth(i)
+            try:
+                text = (await btn.inner_text()).strip().lower()
+                if "easy apply" in text and await btn.is_visible(timeout=500):
+                    return btn
+            except Exception:
+                continue
+        return None
+
+    @staticmethod
+    async def _force_click_easy_apply_by_text(page: Page) -> bool:
+        script = """
+        () => {
+          const nodes = Array.from(
+            document.querySelectorAll("button, a, [role='button']")
+          );
+          const target = nodes.find((el) => {
+            const text = (el.innerText || el.textContent || "").toLowerCase().trim();
+            if (!text.includes("easy apply")) return false;
+            const style = window.getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            const visible = rect.width > 0 && rect.height > 0 &&
+              style.visibility !== "hidden" && style.display !== "none";
+            return visible;
+          });
+          if (!target) return false;
+          target.scrollIntoView({ block: "center", inline: "center" });
+          target.click();
+          return true;
+        }
+        """
+        try:
+            return bool(await page.evaluate(script))
+        except Exception:
+            return False
+
+    @staticmethod
+    async def _in_linkedin_apply_flow(page: Page) -> bool:
+        markers = page.locator(
+            "[aria-label*='Easy Apply'], "
+            "button[aria-label*='Submit application'], "
+            "button:has-text('Submit application'), "
+            "button:has-text('Continue to next step'), "
+            "button:has-text('Review')"
+        )
+        try:
+            return await markers.first.is_visible(timeout=2500)
+        except Exception:
+            return False
 
     # ── Indeed Apply ────────────────────────────────────────────────────
 
