@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.env
+venv/
+.venv/
+backend/uploads/
+backend/sessions/
+backend/logs/
+*.egg-info/
+dist/
+build/
+.playwright/

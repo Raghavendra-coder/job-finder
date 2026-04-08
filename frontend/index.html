@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Job Search Automation</title>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --surface2: #242836;
+      --border: #2e3348;
+      --text: #e4e6f0;
+      --text-muted: #8b8fa3;
+      --primary: #6c63ff;
+      --primary-hover: #5a52e0;
+      --success: #22c55e;
+      --warning: #f59e0b;
+      --error: #ef4444;
+      --info: #3b82f6;
+      --radius: 12px;
+      --shadow: 0 4px 24px rgba(0,0,0,.35);
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      min-height: 100vh;
+    }
+    a { color: var(--primary); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    .container { max-width: 1120px; margin: 0 auto; padding: 24px 20px; }
+    header {
+      background: linear-gradient(135deg, var(--primary) 0%, #4338ca 100%);
+      padding: 32px 0;
+      text-align: center;
+      margin-bottom: 32px;
+    }
+    header h1 { font-size: 1.75rem; font-weight: 700; letter-spacing: -0.5px; }
+    header p { color: rgba(255,255,255,.75); margin-top: 6px; font-size: .95rem; }
+
+    .grid { display: grid; gap: 24px; }
+    .grid-2 { grid-template-columns: 1fr 1fr; }
+    @media (max-width: 768px) { .grid-2 { grid-template-columns: 1fr; } }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+      box-shadow: var(--shadow);
+    }
+    .card h2 {
+      font-size: 1.1rem;
+      font-weight: 600;
+      margin-bottom: 18px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .card h2 .icon { font-size: 1.25rem; }
+
+    label { display: block; font-size: .85rem; color: var(--text-muted); margin-bottom: 6px; font-weight: 500; }
+    input[type="file"],
+    input[type="number"],
+    textarea, select {
+      width: 100%;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      padding: 10px 14px;
+      font-size: .9rem;
+      font-family: inherit;
+      transition: border-color .2s;
+    }
+    input:focus, textarea:focus, select:focus {
+      outline: none;
+      border-color: var(--primary);
+    }
+    textarea { resize: vertical; min-height: 120px; }
+
+    .checkbox-group { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 4px; }
+    .checkbox-group label {
+      display: flex; align-items: center; gap: 6px;
+      font-size: .9rem; color: var(--text); cursor: pointer;
+      background: var(--surface2); padding: 8px 14px;
+      border-radius: 8px; border: 1px solid var(--border);
+      transition: border-color .2s, background .2s;
+    }
+    .checkbox-group label:hover { border-color: var(--primary); }
+    .checkbox-group input[type="checkbox"] { accent-color: var(--primary); width: 16px; height: 16px; }
+
+    .field-group { margin-bottom: 16px; }
+
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+      padding: 12px 28px;
+      font-size: .95rem; font-weight: 600; font-family: inherit;
+      border: none; border-radius: 8px; cursor: pointer;
+      transition: background .2s, transform .1s;
+    }
+    .btn:active { transform: scale(.97); }
+    .btn-primary { background: var(--primary); color: #fff; }
+    .btn-primary:hover { background: var(--primary-hover); }
+    .btn-primary:disabled { opacity: .5; cursor: not-allowed; }
+    .btn-danger { background: var(--error); color: #fff; }
+    .btn-danger:hover { background: #dc2626; }
+    .btn-sm { padding: 8px 18px; font-size: .85rem; }
+    .btn-group { display: flex; gap: 12px; margin-top: 20px; }
+
+    /* Stats */
+    .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 24px; }
+    @media (max-width: 600px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+    .stat-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      text-align: center;
+    }
+    .stat-card .number { font-size: 2rem; font-weight: 700; }
+    .stat-card .label { font-size: .8rem; color: var(--text-muted); margin-top: 4px; }
+    .stat-card.found .number { color: var(--info); }
+    .stat-card.applied .number { color: var(--success); }
+    .stat-card.skipped .number { color: var(--warning); }
+    .stat-card.errors .number { color: var(--error); }
+
+    /* Log viewer */
+    .log-viewer {
+      background: #0d0f14;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      max-height: 400px;
+      overflow-y: auto;
+      font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+      font-size: .82rem;
+      line-height: 1.7;
+    }
+    .log-viewer::-webkit-scrollbar { width: 6px; }
+    .log-viewer::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    .log-entry { padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,.04); }
+    .log-entry .time { color: var(--text-muted); margin-right: 10px; }
+
+    /* Application table */
+    .app-table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+    .app-table th {
+      text-align: left; padding: 10px 12px;
+      background: var(--surface2); color: var(--text-muted);
+      font-weight: 600; font-size: .78rem; text-transform: uppercase; letter-spacing: .5px;
+    }
+    .app-table td { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+    .app-table tr:hover td { background: rgba(108,99,255,.05); }
+
+    .badge {
+      display: inline-block; padding: 3px 10px;
+      border-radius: 20px; font-size: .75rem; font-weight: 600;
+    }
+    .badge-success { background: rgba(34,197,94,.15); color: var(--success); }
+    .badge-error { background: rgba(239,68,68,.15); color: var(--error); }
+    .badge-warning { background: rgba(245,158,11,.15); color: var(--warning); }
+    .badge-info { background: rgba(59,130,246,.15); color: var(--info); }
+
+    .resume-info {
+      background: var(--surface2);
+      border-radius: 8px;
+      padding: 14px;
+      margin-top: 12px;
+      font-size: .85rem;
+    }
+    .resume-info .tag {
+      display: inline-block; background: rgba(108,99,255,.15); color: var(--primary);
+      padding: 3px 10px; border-radius: 20px; font-size: .78rem; margin: 3px 4px 3px 0;
+    }
+
+    .status-indicator {
+      display: inline-block; width: 10px; height: 10px;
+      border-radius: 50%; margin-right: 8px;
+    }
+    .status-indicator.active { background: var(--success); animation: pulse 1.5s infinite; }
+    .status-indicator.idle { background: var(--text-muted); }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: .4; }
+    }
+
+    .hidden { display: none !important; }
+    .mt-24 { margin-top: 24px; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="container">
+      <h1>AI Job Search Automation</h1>
+      <p>Upload your resume, set preferences, and let AI find and apply to jobs for you</p>
+    </div>
+  </header>
+
+  <div class="container">
+    <!-- Stats -->
+    <div class="stats" id="stats">
+      <div class="stat-card found">
+        <div class="number" id="stat-found">0</div>
+        <div class="label">Jobs Found</div>
+      </div>
+      <div class="stat-card applied">
+        <div class="number" id="stat-applied">0</div>
+        <div class="label">Applied</div>
+      </div>
+      <div class="stat-card skipped">
+        <div class="number" id="stat-skipped">0</div>
+        <div class="label">Skipped</div>
+      </div>
+      <div class="stat-card errors">
+        <div class="number" id="stat-errors">0</div>
+        <div class="label">Errors</div>
+      </div>
+    </div>
+
+    <!-- Main Grid -->
+    <div class="grid grid-2">
+      <!-- Left: Configuration -->
+      <div>
+        <!-- Resume Upload -->
+        <div class="card">
+          <h2><span class="icon">&#128196;</span> Resume</h2>
+          <div class="field-group">
+            <label for="resume">Upload Resume (PDF / DOCX)</label>
+            <input type="file" id="resume" accept=".pdf,.docx,.doc,.txt" />
+          </div>
+          <button class="btn btn-primary btn-sm" id="btn-upload" onclick="uploadResume()">
+            Upload &amp; Parse
+          </button>
+          <div id="resume-info" class="resume-info hidden"></div>
+        </div>
+
+        <!-- Job Preferences -->
+        <div class="card mt-24">
+          <h2><span class="icon">&#128270;</span> Job Preferences</h2>
+          <div class="field-group">
+            <label for="jd">Job Description / Keywords</label>
+            <textarea id="jd" placeholder="e.g. Senior Python Developer with AWS experience, or paste a full job description..."></textarea>
+          </div>
+
+          <div class="field-group">
+            <label>Work Mode</label>
+            <div class="checkbox-group">
+              <label><input type="checkbox" name="workmode" value="onsite" /> Onsite</label>
+              <label><input type="checkbox" name="workmode" value="hybrid" /> Hybrid</label>
+              <label><input type="checkbox" name="workmode" value="remote" checked /> Remote</label>
+            </div>
+          </div>
+
+          <div class="field-group">
+            <label>Job Portals</label>
+            <div class="checkbox-group">
+              <label><input type="checkbox" name="portal" value="linkedin" checked /> LinkedIn</label>
+              <label><input type="checkbox" name="portal" value="indeed" /> Indeed</label>
+              <label><input type="checkbox" name="portal" value="naukri" /> Naukri</label>
+            </div>
+          </div>
+
+          <div class="field-group">
+            <label for="max-apps">Max Applications</label>
+            <input type="number" id="max-apps" value="25" min="1" max="200" />
+          </div>
+
+          <div class="btn-group">
+            <button class="btn btn-primary" id="btn-start" onclick="startSearch()">
+              Start Job Search
+            </button>
+            <button class="btn btn-danger btn-sm hidden" id="btn-stop" onclick="stopSearch()">
+              Stop
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right: Live Status -->
+      <div>
+        <div class="card">
+          <h2>
+            <span class="status-indicator idle" id="status-dot"></span>
+            <span id="status-text">Idle</span>
+          </h2>
+          <div class="log-viewer" id="log-viewer">
+            <div class="log-entry"><span class="time">--:--:--</span> Waiting to start...</div>
+          </div>
+        </div>
+
+        <!-- Applications Table -->
+        <div class="card mt-24" id="app-table-card">
+          <h2><span class="icon">&#128203;</span> Applications</h2>
+          <div style="overflow-x:auto;">
+            <table class="app-table">
+              <thead>
+                <tr>
+                  <th>Job Title</th>
+                  <th>Company</th>
+                  <th>Portal</th>
+                  <th>Score</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="app-table-body">
+                <tr><td colspan="5" style="text-align:center; color: var(--text-muted);">No applications yet</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const API = window.location.origin + '/api';
+    let currentSessionId = null;
+    let pollInterval = null;
+    let resumePath = '';
+
+    async function uploadResume() {
+      const fileInput = document.getElementById('resume');
+      const btn = document.getElementById('btn-upload');
+
+      if (!fileInput.files.length) {
+        alert('Please select a resume file.');
+        return;
+      }
+
+      btn.disabled = true;
+      btn.textContent = 'Parsing...';
+
+      const form = new FormData();
+      form.append('file', fileInput.files[0]);
+
+      try {
+        const res = await fetch(`${API}/upload-resume`, { method: 'POST', body: form });
+        const data = await res.json();
+
+        if (!res.ok) {
+          alert(data.error || 'Upload failed');
+          return;
+        }
+
+        resumePath = data.resume_path;
+        const d = data.data;
+
+        let html = `<strong>${d.name || 'Name not detected'}</strong>`;
+        if (d.email) html += ` &middot; ${d.email}`;
+        if (d.phone) html += ` &middot; ${d.phone}`;
+        if (d.skills && d.skills.length) {
+          html += '<div style="margin-top:8px;">';
+          d.skills.forEach(s => { html += `<span class="tag">${s}</span>`; });
+          html += '</div>';
+        }
+
+        const info = document.getElementById('resume-info');
+        info.innerHTML = html;
+        info.classList.remove('hidden');
+        addLog('Resume parsed successfully');
+      } catch (err) {
+        alert('Upload error: ' + err.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Upload & Parse';
+      }
+    }
+
+    async function startSearch() {
+      const jd = document.getElementById('jd').value.trim();
+      if (!jd) { alert('Enter a job description or keywords.'); return; }
+
+      const workModes = [...document.querySelectorAll('input[name="workmode"]:checked')]
+        .map(el => el.value).join(',');
+      const portals = [...document.querySelectorAll('input[name="portal"]:checked')]
+        .map(el => el.value).join(',');
+      const maxApps = document.getElementById('max-apps').value;
+
+      if (!workModes) { alert('Select at least one work mode.'); return; }
+      if (!portals) { alert('Select at least one portal.'); return; }
+
+      const btn = document.getElementById('btn-start');
+      const stopBtn = document.getElementById('btn-stop');
+      btn.disabled = true;
+      btn.textContent = 'Starting...';
+      stopBtn.classList.remove('hidden');
+
+      const form = new FormData();
+      form.append('job_description', jd);
+      form.append('work_modes', workModes);
+      form.append('portals', portals);
+      form.append('max_applications', maxApps);
+      if (resumePath) form.append('resume_path', resumePath);
+
+      try {
+        const res = await fetch(`${API}/start-search`, { method: 'POST', body: form });
+        const data = await res.json();
+
+        if (!res.ok) {
+          alert(data.error || 'Failed to start search');
+          btn.disabled = false;
+          btn.textContent = 'Start Job Search';
+          return;
+        }
+
+        currentSessionId = data.session_id;
+        setStatus('running');
+        addLog(`Search started (session: ${currentSessionId})`);
+
+        startPolling();
+      } catch (err) {
+        alert('Error: ' + err.message);
+        btn.disabled = false;
+        btn.textContent = 'Start Job Search';
+      }
+    }
+
+    async function stopSearch() {
+      try {
+        await fetch(`${API}/stop`, { method: 'POST' });
+        setStatus('stopped');
+        addLog('Search stopped by user');
+        stopPolling();
+      } catch (err) {
+        addLog('Error stopping: ' + err.message);
+      }
+    }
+
+    function startPolling() {
+      if (pollInterval) clearInterval(pollInterval);
+      pollInterval = setInterval(pollStatus, 2000);
+    }
+
+    function stopPolling() {
+      if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+      document.getElementById('btn-start').disabled = false;
+      document.getElementById('btn-start').textContent = 'Start Job Search';
+      document.getElementById('btn-stop').classList.add('hidden');
+    }
+
+    let lastLogCount = 0;
+    async function pollStatus() {
+      if (!currentSessionId) return;
+
+      try {
+        const res = await fetch(`${API}/status/${currentSessionId}`);
+        if (!res.ok) return;
+        const data = await res.json();
+
+        document.getElementById('stat-found').textContent = data.jobs_found;
+        document.getElementById('stat-applied').textContent = data.jobs_applied;
+        document.getElementById('stat-skipped').textContent = data.jobs_skipped;
+        document.getElementById('stat-errors').textContent = data.errors;
+
+        if (data.logs && data.logs.length > lastLogCount) {
+          const newLogs = data.logs.slice(lastLogCount);
+          newLogs.forEach(msg => addLog(msg));
+          lastLogCount = data.logs.length;
+        }
+
+        renderApplications(data.applications || []);
+
+        if (data.status === 'completed' || data.status === 'error') {
+          setStatus(data.status);
+          stopPolling();
+        }
+      } catch { /* ignore poll errors */ }
+    }
+
+    function renderApplications(apps) {
+      const tbody = document.getElementById('app-table-body');
+      if (!apps.length) return;
+
+      let html = '';
+      apps.forEach(app => {
+        const job = app.job;
+        const statusClass =
+          app.status === 'applied' ? 'badge-success' :
+          app.status === 'error' || app.status === 'failed' ? 'badge-error' :
+          'badge-warning';
+
+        html += `<tr>
+          <td><a href="${job.url}" target="_blank">${job.title}</a></td>
+          <td>${job.company}</td>
+          <td>${job.portal}</td>
+          <td>${(job.match_score * 100).toFixed(0)}%</td>
+          <td><span class="badge ${statusClass}">${app.status}</span></td>
+        </tr>`;
+      });
+      tbody.innerHTML = html;
+    }
+
+    function setStatus(status) {
+      const dot = document.getElementById('status-dot');
+      const text = document.getElementById('status-text');
+
+      dot.className = 'status-indicator';
+      switch (status) {
+        case 'running':
+          dot.classList.add('active');
+          text.textContent = 'Running...';
+          break;
+        case 'completed':
+          dot.style.background = 'var(--success)';
+          text.textContent = 'Completed';
+          break;
+        case 'error':
+          dot.style.background = 'var(--error)';
+          text.textContent = 'Error';
+          break;
+        case 'stopped':
+          dot.style.background = 'var(--warning)';
+          text.textContent = 'Stopped';
+          break;
+        default:
+          dot.classList.add('idle');
+          text.textContent = 'Idle';
+      }
+    }
+
+    function addLog(message) {
+      const viewer = document.getElementById('log-viewer');
+      const now = new Date().toLocaleTimeString();
+      const entry = document.createElement('div');
+      entry.className = 'log-entry';
+      entry.innerHTML = `<span class="time">${now}</span> ${escapeHtml(message)}`;
+      viewer.appendChild(entry);
+      viewer.scrollTop = viewer.scrollHeight;
+    }
+
+    function escapeHtml(str) {
+      const div = document.createElement('div');
+      div.textContent = str;
+      return div.innerHTML;
+    }
+
+    // Poll dashboard on load
+    (async function initDashboard() {
+      try {
+        const res = await fetch(`${API}/dashboard`);
+        if (res.ok) {
+          const data = await res.json();
+          document.getElementById('stat-found').textContent = data.total_found;
+          document.getElementById('stat-applied').textContent = data.total_applied;
+          document.getElementById('stat-skipped').textContent = data.total_skipped;
+          document.getElementById('stat-errors').textContent = data.total_errors;
+          if (data.recent_applications) renderApplications(
+            data.recent_applications.map(a => ({
+              job: { title: a.title, company: a.company, portal: a.portal, match_score: a.score, url: a.url },
+              status: a.status,
+            }))
+          );
+        }
+      } catch { /* server may not be ready */ }
+    })();
+  </script>
+</body>
+</html>
