@@ -23,6 +23,7 @@ class LinkedInCrawler(BaseCrawler):
             f"keywords={quote_plus(self.search_query)}",
             "f_JT=F",  # Full-time only
             "f_AL=true",  # Easy Apply only
+            "locale=en_US",
         ]
         if self.location:
             params.append(f"location={quote_plus(self.location)}")

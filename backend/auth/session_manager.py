@@ -15,6 +15,7 @@ from backend.config import (
     LINKEDIN_EMAIL,
     LINKEDIN_PASSWORD,
     MAX_DELAY,
+    MANUAL_LOGIN_TIMEOUT_SECONDS,
     MIN_DELAY,
     NAUKRI_EMAIL,
     NAUKRI_PASSWORD,
@@ -95,6 +96,7 @@ async def create_context(portal: JobPortal) -> BrowserContext:
     if BROWSER_CONNECT_OVER_CDP and browser.contexts:
         # Reuse the existing Chrome profile context so saved sessions are available.
         context = browser.contexts[0]
+        await context.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
         return context
 
     context = await browser.new_context(
@@ -106,6 +108,7 @@ async def create_context(portal: JobPortal) -> BrowserContext:
         ),
         locale="en-US",
     )
+    await context.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
     _managed_context_ids.add(id(context))
     await load_cookies(context, portal)
     return context
@@ -139,7 +142,7 @@ async def login_linkedin(page: Page) -> bool:
     email, password = PORTAL_CREDENTIALS[JobPortal.LINKEDIN]
 
     # In CDP/shared-profile mode, user may already be logged in.
-    await page.goto("https://www.linkedin.com/jobs/", wait_until="domcontentloaded")
+    await page.goto("https://www.linkedin.com/jobs/?locale=en_US", wait_until="domcontentloaded")
     await human_delay(1, 2)
     if await _is_logged_in(page, JobPortal.LINKEDIN):
         logger.info("LinkedIn session already active")
@@ -228,16 +231,33 @@ async def login_naukri(page: Page) -> bool:
     return await _wait_for_manual_login(page, JobPortal.NAUKRI)
 
 
-async def _wait_for_manual_login(page: Page, portal: JobPortal, timeout: int = 120) -> bool:
+async def _wait_for_manual_login(
+    page: Page,
+    portal: JobPortal,
+    timeout: int | None = None,
+) -> bool:
     """
     Wait up to `timeout` seconds for the user to complete manual login.
     The browser window stays open — the user logs in manually.
     """
+    wait_timeout = MANUAL_LOGIN_TIMEOUT_SECONDS if timeout is None else timeout
+    if wait_timeout <= 0:
+        logger.info(
+            "Waiting indefinitely for manual login on %s — "
+            "please log in via the browser window",
+            portal.value,
+        )
+        while True:
+            await asyncio.sleep(3)
+            if await _is_logged_in(page, portal):
+                logger.info("Manual login detected for %s", portal.value)
+                return True
+
     logger.info(
         "Waiting up to %ds for manual login on %s — please log in via the browser window",
-        timeout, portal.value,
+        wait_timeout, portal.value,
     )
-    for _ in range(timeout // 3):
+    for _ in range(wait_timeout // 3):
         await asyncio.sleep(3)
         if await _is_logged_in(page, portal):
             logger.info("Manual login detected for %s", portal.value)

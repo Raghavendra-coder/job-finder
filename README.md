@@ -177,6 +177,7 @@ All settings are in `.env`:
 | `CHROME_CDP_URL` | Chrome DevTools endpoint when CDP mode is enabled | `http://localhost:9222` |
 | `MATCH_THRESHOLD` | Minimum match score to apply (0.0-1.0) | `0.5` |
 | `MIN_DELAY` / `MAX_DELAY` | Random delay range in seconds | `2` / `5` |
+| `MANUAL_LOGIN_TIMEOUT_SECONDS` | Manual login wait timeout; `0` = no timeout | `0` |
 | `PROXY_URL` | HTTP proxy for browser (optional) | — |
 
 ### Use Existing Chrome Window (CDP mode)
@@ -204,7 +205,7 @@ If you want login tabs to open in a Chrome window that is already running, start
 The system attempts automatic login with your credentials. If 2FA or CAPTCHA is detected:
 
 1. The browser window stays open
-2. The system pauses and waits up to 120 seconds
+2. The system waits for manual verification (`MANUAL_LOGIN_TIMEOUT_SECONDS=0` waits indefinitely)
 3. Complete the verification manually in the browser
 4. The system detects the login and continues
 5. Cookies are saved for future sessions

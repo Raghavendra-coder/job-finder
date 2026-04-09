@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -96,11 +97,12 @@ class AutoApplyBot:
     async def _apply_linkedin(
         self, page: Page, job: JobListing, app_log: ApplicationLog,
     ) -> bool:
-        if "linkedin.com/jobs/view" not in job.url:
+        target_url = self._canonical_linkedin_job_url(job.url)
+        if not target_url:
             app_log.error = "not_linkedin_easy_apply_url"
             return False
 
-        await page.goto(job.url, wait_until="domcontentloaded")
+        await page.goto(target_url, wait_until="domcontentloaded")
         await human_delay(2, 3)
         try:
             await page.wait_for_load_state("networkidle", timeout=7000)
@@ -110,8 +112,13 @@ class AutoApplyBot:
         await human_delay(0.3, 0.7)
 
         if "linkedin.com/jobs/view" not in page.url.lower():
-            app_log.error = "linkedin_redirected_from_job_page"
-            return False
+            # LinkedIn can occasionally redirect into list-pane URLs. Retry canonical.
+            retry_url = self._canonical_linkedin_job_url(page.url) or target_url
+            await page.goto(retry_url, wait_until="domcontentloaded")
+            await human_delay(1, 2)
+            if "linkedin.com/jobs/view" not in page.url.lower():
+                app_log.error = "linkedin_redirected_from_job_page"
+                return False
 
         apply_btn = await self._find_linkedin_easy_apply_button(page)
         if apply_btn is None:
@@ -145,25 +152,33 @@ class AutoApplyBot:
         for step in range(max_steps):
             await self._emit(f"  Step {step + 1} of application form")
             await self._fill_visible_fields(page, app_log)
+            await self._handle_radio_fields(page, app_log)
+            await self._handle_checkbox_fields(page)
             await human_delay(1, 2)
 
             submit = page.locator(
                 "button[aria-label*='Submit application'], "
-                "button:has-text('Submit application')"
+                "button:has-text('Submit application'), "
+                "button:has-text('Submit')"
             ).first
-            if await submit.is_visible():
-                await submit.click()
+            if await self._click_if_enabled(submit):
                 await human_delay(2, 3)
                 await self._emit("  Application submitted!")
                 return True
 
             next_btn = page.locator(
                 "button[aria-label='Continue to next step'], "
+                "button[aria-label*='Continue'], "
+                "button:has-text('Continue'), "
                 "button:has-text('Next'), "
-                "button:has-text('Review')"
+                "button:has-text('Review'), "
+                "button:has-text('Review application')"
             ).first
-            if await next_btn.is_visible():
-                await next_btn.click()
+            if await self._click_if_enabled(next_btn):
+                await human_delay(1, 2)
+                continue
+
+            if await self._click_primary_easy_apply_action(page):
                 await human_delay(1, 2)
             else:
                 break
@@ -234,6 +249,18 @@ class AutoApplyBot:
             return False
 
     @staticmethod
+    def _canonical_linkedin_job_url(url: str) -> str:
+        if "linkedin.com/jobs/view/" in url:
+            return url
+        match = re.search(r"/jobs/view/(\d+)", url)
+        if match:
+            return f"https://www.linkedin.com/jobs/view/{match.group(1)}/?locale=en_US"
+        match = re.search(r"[?&]currentJobId=(\d+)", url)
+        if match:
+            return f"https://www.linkedin.com/jobs/view/{match.group(1)}/?locale=en_US"
+        return ""
+
+    @staticmethod
     async def _in_linkedin_apply_flow(page: Page) -> bool:
         markers = page.locator(
             "[aria-label*='Easy Apply'], "
@@ -246,6 +273,17 @@ class AutoApplyBot:
             return await markers.first.is_visible(timeout=2500)
         except Exception:
             return False
+
+    @staticmethod
+    async def _click_primary_easy_apply_action(page: Page) -> bool:
+        """
+        Language-agnostic fallback: click the primary button in Easy Apply modal footer.
+        """
+        footer_btn = page.locator(
+            ".jobs-easy-apply-modal footer button.artdeco-button--primary, "
+            ".jobs-easy-apply-content footer button.artdeco-button--primary"
+        ).last
+        return await AutoApplyBot._click_if_enabled(footer_btn)
 
     # ── Indeed Apply ────────────────────────────────────────────────────
 
@@ -399,6 +437,85 @@ class AutoApplyBot:
             await sel.select_option(value=best_val)
             app_log.answers[label] = answer
             await human_delay(0.3, 0.7)
+
+    async def _handle_radio_fields(self, page: Page, app_log: ApplicationLog) -> None:
+        fieldsets = await page.query_selector_all("fieldset")
+        for fs in fieldsets:
+            radios = await fs.query_selector_all("input[type='radio']")
+            if not radios:
+                continue
+
+            selected = False
+            for radio in radios:
+                if await radio.is_checked():
+                    selected = True
+                    break
+            if selected:
+                continue
+
+            legend_el = await fs.query_selector("legend")
+            label = (await legend_el.inner_text()).strip() if legend_el else "Screening question"
+            options: list[tuple[object, str]] = []
+            for radio in radios:
+                rid = await radio.get_attribute("id") or ""
+                text = ""
+                if rid:
+                    lbl = await page.query_selector(f"label[for='{rid}']")
+                    if lbl:
+                        text = (await lbl.inner_text()).strip()
+                if not text:
+                    text = await radio.get_attribute("value") or ""
+                if text:
+                    options.append((radio, text))
+
+            if not options:
+                continue
+
+            choices = ", ".join(t for _, t in options)
+            question = f"{label} (choose one: {choices})"
+            answer = await generate_answer(question, self.resume_data, self.job_description)
+
+            chosen = options[-1][0]
+            answer_lower = answer.lower()
+            for radio, text in options:
+                text_lower = text.lower()
+                if text_lower in answer_lower or answer_lower in text_lower:
+                    chosen = radio
+                    break
+
+            try:
+                await chosen.check()
+                app_log.answers[label] = answer
+                await human_delay(0.2, 0.5)
+            except Exception:
+                continue
+
+    @staticmethod
+    async def _handle_checkbox_fields(page: Page) -> None:
+        checkboxes = await page.query_selector_all("input[type='checkbox']")
+        for box in checkboxes:
+            try:
+                if await box.is_checked():
+                    continue
+                req = await box.get_attribute("required")
+                aria_req = await box.get_attribute("aria-required")
+                if req is not None or aria_req == "true":
+                    await box.check()
+                    await human_delay(0.1, 0.3)
+            except Exception:
+                continue
+
+    @staticmethod
+    async def _click_if_enabled(locator) -> bool:
+        try:
+            if not await locator.is_visible(timeout=1200):
+                return False
+            if await locator.is_disabled():
+                return False
+            await locator.click(timeout=2000)
+            return True
+        except Exception:
+            return False
 
     async def _handle_resume_upload(self, page: Page) -> None:
         file_input = page.locator('input[type="file"]').first

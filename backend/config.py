@@ -53,3 +53,7 @@ MATCH_THRESHOLD: float = float(os.getenv("MATCH_THRESHOLD", "0.5"))
 # --- Rate limiting -----------------------------------------------------------
 MIN_DELAY: float = float(os.getenv("MIN_DELAY", "2"))
 MAX_DELAY: float = float(os.getenv("MAX_DELAY", "5"))
+
+# --- Authentication ----------------------------------------------------------
+# 0 means wait indefinitely for manual login/verification.
+MANUAL_LOGIN_TIMEOUT_SECONDS: int = int(os.getenv("MANUAL_LOGIN_TIMEOUT_SECONDS", "0"))
