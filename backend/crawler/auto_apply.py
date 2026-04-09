@@ -123,13 +123,41 @@ class AutoApplyBot:
                 app_log.error = "linkedin_redirected_from_job_page"
                 return False
 
+        is_split_layout = await self._is_split_linkedin_layout(page)
         job_container = await self._get_linkedin_job_container(page, target_url)
-        apply_btn = await self._find_linkedin_easy_apply_button(page, job_container)
+        if is_split_layout and job_container is not page:
+            await self._prime_linkedin_detail_panel(page, job_container)
+
+        apply_btn = await self._find_linkedin_easy_apply_button(
+            page,
+            job_container,
+            allow_page_fallback=not is_split_layout,
+        )
         clicked = False
         if apply_btn is not None:
             clicked = await self._click_if_enabled(apply_btn)
-        if not clicked:
+        if not clicked and job_container is not page:
             clicked = await self._force_click_easy_apply_by_text(page, job_container)
+        if not clicked and is_split_layout and job_container is not page:
+            visible_buttons = await self._list_button_labels(job_container)
+            if visible_buttons:
+                await self._emit(
+                    "  Right panel buttons before fallback: "
+                    + ", ".join(visible_buttons[:8])
+                )
+            try:
+                await page.screenshot(path="/tmp/linkedin-split-debug.png", full_page=True)
+            except Exception:
+                pass
+
+        if not clicked:
+            apply_btn = await self._find_linkedin_easy_apply_button(
+                page,
+                page,
+                allow_page_fallback=True,
+            )
+            if apply_btn is not None:
+                clicked = await self._click_if_enabled(apply_btn)
         if not clicked:
             clicked = await self._force_click_easy_apply_by_text(page)
         if not clicked:
@@ -208,11 +236,13 @@ class AutoApplyBot:
         self,
         page: Page,
         container=None,
+        allow_page_fallback: bool = True,
     ):
         search_roots = []
         if container is not None:
             search_roots.append(container)
-        search_roots.append(page)
+        if allow_page_fallback and page not in search_roots:
+            search_roots.append(page)
 
         selectors = [
             "button.jobs-apply-button",
@@ -442,13 +472,15 @@ class AutoApplyBot:
                 continue
 
             label = await self._get_label(container, inp)
+            field_context = await self._get_field_context(container, inp, label)
             placeholder = await self._locator_attribute(inp, "placeholder")
             input_type = (await self._locator_attribute(inp, "type")).lower()
+            input_mode = (await self._locator_attribute(inp, "inputmode")).lower()
             existing = await self._get_field_value(inp)
             if existing.strip():
                 continue
 
-            direct_value = self._contact_value_for_label(label, name, email, phone)
+            direct_value = self._contact_value_for_label(field_context or label, name, email, phone)
             if direct_value:
                 try:
                     await inp.fill(direct_value)
@@ -457,19 +489,26 @@ class AutoApplyBot:
                     pass
                 continue
 
-            field_label = label or placeholder or "Screening question"
+            field_label = field_context or label or placeholder or "Screening question"
             validation_text = await self._get_field_validation_text(inp)
             field_type = self._classify_field(
                 field_label,
                 placeholder=placeholder,
                 input_type=input_type,
+                input_mode=input_mode,
                 validation_text=validation_text,
             )
 
             if field_type == "text" and not field_label:
                 continue
 
-            if field_type == "text":
+            if self._is_numeric_field_type(field_type):
+                value = self._rule_based_field_value(
+                    field_type,
+                    field_label,
+                    validation_text=validation_text,
+                )
+            elif field_type == "text":
                 value = await generate_answer(field_label, self.resume_data, self.job_description)
             else:
                 value = self._rule_based_field_value(
@@ -490,6 +529,8 @@ class AutoApplyBot:
             logger.info("Field: %s | Type: %s | Value: %s", field_label, field_type, value)
 
             try:
+                if self._is_numeric_field_type(field_type):
+                    await inp.fill("")
                 await inp.fill(value)
                 await human_delay(0.3, 0.7)
             except Exception:
@@ -501,9 +542,10 @@ class AutoApplyBot:
                     field_label,
                     placeholder=placeholder,
                     input_type=input_type,
+                    input_mode=input_mode,
                     validation_text=retry_error,
                 )
-                if retry_type != "text":
+                if self._is_numeric_field_type(retry_type):
                     retry_value = self._rule_based_field_value(
                         retry_type,
                         field_label,
@@ -511,18 +553,18 @@ class AutoApplyBot:
                     )
                     retry_value = self._sanitize_field_value(
                         retry_value or value,
-                        field_type="numeric",
+                        field_type=retry_type,
                         label=field_label,
                         validation_text=retry_error,
                     ) or "1"
-                    if retry_value != value:
-                        try:
-                            await inp.fill(retry_value)
-                            await human_delay(0.3, 0.5)
-                            value = retry_value
-                            field_type = retry_type
-                        except Exception:
-                            pass
+                    try:
+                        await inp.fill("")
+                        await inp.fill(retry_value)
+                        await human_delay(0.3, 0.5)
+                        value = retry_value
+                        field_type = retry_type
+                    except Exception:
+                        pass
 
             app_log.answers[field_label] = value
 
@@ -537,6 +579,7 @@ class AutoApplyBot:
                 continue
 
             label = await self._get_label(container, sel)
+            label = await self._get_field_context(container, sel, label) or label
             options = sel.locator("option")
             option_count = await options.count()
             option_texts = []
@@ -791,26 +834,38 @@ class AutoApplyBot:
         return "invalid" if aria_invalid == "true" else ""
 
     @staticmethod
+    def _is_numeric_field_type(field_type: str) -> bool:
+        return field_type in {"salary", "experience", "notice_days", "numeric"}
+
+    @staticmethod
     def _classify_field(
         label: str,
         placeholder: str = "",
         input_type: str = "",
+        input_mode: str = "",
         validation_text: str = "",
     ) -> str:
         text = " ".join(
             part for part in (label, placeholder, validation_text) if part
         ).lower()
         input_type = (input_type or "").lower()
+        input_mode = (input_mode or "").lower()
 
         if any(token in text for token in ("ctc", "salary", "compensation", "package", "lpa")):
             return "salary"
-        if "notice period" in text or ("notice" in text and any(token in text for token in ("day", "days", "month", "months", "period"))):
-            return "notice"
+        if any(token in text for token in ("notice period", "serving notice", "notice")):
+            return "notice_days"
+        if any(token in text for token in ("join", "joining", "how soon can you join", "immediate joiner")) and any(
+            token in text for token in ("day", "days", "month", "months", "period", "how soon", "earliest")
+        ):
+            return "notice_days"
         if any(token in text for token in ("overall exp", "overall experience", "years of experience", "years of exp", "experience")):
             return "experience"
-        if input_type in {"number", "range"}:
+        if input_type in {"number", "range"} or input_mode in {"numeric", "decimal"}:
             return "numeric"
         if "decimal number" in text or "whole number" in text:
+            return "numeric"
+        if any(token in text for token in ("how many", "number", "days", "day", "months", "month")):
             return "numeric"
         if re.search(r"\bexp\b", text) or re.search(r"\byears?\b", text):
             return "numeric"
@@ -838,7 +893,7 @@ class AutoApplyBot:
                 validation_text=validation_text,
             )
 
-        if field_type == "notice":
+        if field_type == "notice_days":
             return self._format_number(
                 self._notice_value_for_label(label_lower),
                 label,
@@ -852,7 +907,7 @@ class AutoApplyBot:
                     label,
                     validation_text=validation_text,
                 )
-            if "notice" in label_lower:
+            if any(token in label_lower for token in ("notice", "join", "joining", "day", "days")):
                 return self._format_number(
                     self._notice_value_for_label(label_lower),
                     label,
@@ -889,7 +944,7 @@ class AutoApplyBot:
                 return yes_like
 
         field_type = self._classify_field(label)
-        if field_type in {"salary", "experience", "notice", "numeric"}:
+        if field_type in {"salary", "experience", "notice_days", "numeric"}:
             numeric_value = self._rule_based_field_value(field_type, label)
             numeric_match = self._match_numeric_option(option_texts, numeric_value)
             if numeric_match is not None:
@@ -956,7 +1011,7 @@ class AutoApplyBot:
     def _notice_value_for_label(self, label_lower: str) -> float:
         notice_days = self.notice_days if self.notice_days is not None else 30.0
         notice_days = notice_days if notice_days >= 0 else 0.0
-        if "month" in label_lower:
+        if any(token in label_lower for token in ("month", "months")):
             return max(round(notice_days / 30.0, 2), 0.0)
         return notice_days
 
@@ -1003,7 +1058,7 @@ class AutoApplyBot:
         if field_type == "text":
             return " ".join(str(value).strip().split())
 
-        numeric = self._number_from_text(str(value))
+        numeric = self._ensure_numeric_value(str(value))
         if numeric is None:
             numeric = 1.0
         if numeric <= 0 and "larger than 0.0" in validation_text.lower():
@@ -1037,6 +1092,10 @@ class AutoApplyBot:
             return float(match.group(0))
         except ValueError:
             return None
+
+    @classmethod
+    def _ensure_numeric_value(cls, text: str) -> Optional[float]:
+        return cls._number_from_text(text)
 
     async def _wait_for_linkedin_transition(self, page: Page) -> None:
         try:
@@ -1077,9 +1136,31 @@ class AutoApplyBot:
                     await self._click_linkedin_card(page, card)
                     break
 
+        if not await self._is_visible(detail_panel, timeout=2000):
+            cards = page.locator(".jobs-search-results__list-item, .job-card-container, [data-job-id]")
+            if await cards.count() > 0:
+                await self._click_linkedin_card(page, cards.first)
+
         if await self._is_visible(detail_panel, timeout=2000):
             return detail_panel
         return page
+
+    async def _prime_linkedin_detail_panel(self, page: Page, panel) -> None:
+        try:
+            await panel.scroll_into_view_if_needed()
+        except Exception:
+            pass
+        for _ in range(2):
+            try:
+                await panel.evaluate("(el) => el.scrollBy(0, 900)")
+            except Exception:
+                break
+            await human_delay(0.2, 0.4)
+        try:
+            await page.mouse.wheel(0, 1000)
+        except Exception:
+            pass
+        await human_delay(0.6, 1.0)
 
     async def _get_linkedin_modal(self, page: Page) -> Optional[Locator]:
         candidates = [
@@ -1216,6 +1297,44 @@ class AutoApplyBot:
         if match:
             return match.group(1)
         return ""
+
+    async def _get_field_context(self, container, element, label: str = "") -> str:
+        texts: list[str] = []
+        for candidate in (label, await self._locator_attribute(element, "aria-label")):
+            normalized = " ".join(candidate.strip().split())
+            if normalized and normalized not in texts:
+                texts.append(normalized)
+
+        group_locators = [
+            element.locator("xpath=ancestor::*[contains(@class,'fb-form-element')][1]").first,
+            element.locator("xpath=ancestor::*[contains(@class,'jobs-easy-apply-form-section__grouping')][1]").first,
+            element.locator("xpath=ancestor::label[1]").first,
+        ]
+        for group in group_locators:
+            if not await self._is_visible(group, timeout=120):
+                continue
+            prompt_nodes = group.locator(
+                "label, legend, span, p, div[class*='label'], div[class*='question'], "
+                "div[class*='title'], div[class*='prompt']"
+            )
+            count = await prompt_nodes.count()
+            for idx in range(min(count, 8)):
+                node = prompt_nodes.nth(idx)
+                if not await self._is_visible(node, timeout=80):
+                    continue
+                try:
+                    text = " ".join((await node.inner_text()).strip().split())
+                except Exception:
+                    text = ""
+                if not text:
+                    continue
+                lowered = text.lower()
+                if "enter a decimal number" in lowered or "required" == lowered:
+                    continue
+                if text not in texts:
+                    texts.append(text)
+
+        return " ".join(texts).strip()
 
     @staticmethod
     def _contact_value_for_label(label: str, name: str, email: str, phone: str) -> str:
