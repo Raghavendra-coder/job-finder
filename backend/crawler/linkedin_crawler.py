@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from urllib.parse import quote_plus
 
 from backend.auth.session_manager import human_delay
@@ -57,8 +58,6 @@ class LinkedInCrawler(BaseCrawler):
 
             for card in cards:
                 try:
-                    if not await self._is_easy_apply_card(card):
-                        continue
                     job = await self._parse_card(card)
                     if job:
                         jobs.append(job)
@@ -96,6 +95,7 @@ class LinkedInCrawler(BaseCrawler):
             job_id = await card.get_attribute("data-job-id") or ""
             if job_id:
                 href = f"https://www.linkedin.com/jobs/view/{job_id}/"
+        href = self._canonical_job_url(href)
         if not href:
             return None
 
@@ -128,6 +128,18 @@ class LinkedInCrawler(BaseCrawler):
     async def _is_easy_apply_card(card) -> bool:
         text = (await card.inner_text()).lower()
         return "easy apply" in text
+
+    @staticmethod
+    def _canonical_job_url(url: str) -> str:
+        if not url:
+            return ""
+        match = re.search(r"/jobs/view/(\d+)", url)
+        if match:
+            return f"https://www.linkedin.com/jobs/view/{match.group(1)}/?locale=en_US"
+        match = re.search(r"[?&]currentJobId=(\d+)", url)
+        if match:
+            return f"https://www.linkedin.com/jobs/view/{match.group(1)}/?locale=en_US"
+        return url
 
     @staticmethod
     def _detect_work_mode(text: str) -> WorkMode:
