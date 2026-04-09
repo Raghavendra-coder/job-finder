@@ -73,6 +73,15 @@ def _parse_optional_float(raw: str, field_name: str) -> float | None:
     return parsed
 
 
+def _parse_bool(raw: str, field_name: str) -> bool:
+    value = raw.strip().lower()
+    if value in {"", "0", "false", "no", "off"}:
+        return False
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    raise ValueError(f"Invalid {field_name}")
+
+
 @router.post("/upload-resume")
 async def upload_resume(file: UploadFile = File(...)):
     if not file.filename:
@@ -114,6 +123,7 @@ async def start_search(
     expected_ctc: str = Form(""),
     notice_days: str = Form(""),
     total_experience: str = Form(""),
+    is_immediate_joiner: str = Form("false"),
 ):
     global _active_task
 
@@ -137,6 +147,10 @@ async def start_search(
         parsed_total_experience = _parse_optional_float(
             total_experience,
             "TOTAL_EXPERIENCE",
+        )
+        parsed_is_immediate_joiner = _parse_bool(
+            is_immediate_joiner,
+            "IS_IMMEDIATE_JOINER",
         )
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -163,6 +177,7 @@ async def start_search(
         expected_ctc=parsed_expected_ctc,
         notice_days=parsed_notice_days,
         total_experience=parsed_total_experience,
+        is_immediate_joiner=parsed_is_immediate_joiner,
     )
 
     _active_task = asyncio.create_task(
@@ -226,6 +241,7 @@ async def _run_search(
             expected_ctc=request.expected_ctc,
             notice_days=request.notice_days,
             total_experience=request.total_experience,
+            is_immediate_joiner=request.is_immediate_joiner,
             on_status=lambda msg, s=session: s.logs.append(msg),
         )
 

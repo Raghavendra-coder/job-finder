@@ -31,6 +31,7 @@ class AutoApplyBot:
         expected_ctc: Optional[float] = None,
         notice_days: Optional[float] = None,
         total_experience: Optional[float] = None,
+        is_immediate_joiner: bool = False,
         on_status: Optional[Callable[[str], None]] = None,
     ):
         self.resume_data = resume_data
@@ -40,6 +41,7 @@ class AutoApplyBot:
         self.expected_ctc = expected_ctc
         self.notice_days = notice_days
         self.total_experience = total_experience
+        self.is_immediate_joiner = is_immediate_joiner
         self.on_status = on_status or (lambda _: None)
 
     async def _emit(self, msg: str) -> None:
@@ -837,8 +839,9 @@ class AutoApplyBot:
     def _is_numeric_field_type(field_type: str) -> bool:
         return field_type in {"salary", "experience", "notice_days", "numeric"}
 
-    @staticmethod
+    @classmethod
     def _classify_field(
+        cls,
         label: str,
         placeholder: str = "",
         input_type: str = "",
@@ -853,11 +856,9 @@ class AutoApplyBot:
 
         if any(token in text for token in ("ctc", "salary", "compensation", "package", "lpa")):
             return "salary"
-        if any(token in text for token in ("notice period", "serving notice", "notice")):
-            return "notice_days"
-        if any(token in text for token in ("join", "joining", "how soon can you join", "immediate joiner")) and any(
-            token in text for token in ("day", "days", "month", "months", "period", "how soon", "earliest")
-        ):
+        if cls._is_immediate_joiner_label(text):
+            return "immediate_joiner"
+        if cls._is_notice_label(text):
             return "notice_days"
         if any(token in text for token in ("overall exp", "overall experience", "years of experience", "years of exp", "experience")):
             return "experience"
@@ -900,6 +901,9 @@ class AutoApplyBot:
                 validation_text=validation_text,
             )
 
+        if field_type == "immediate_joiner":
+            return self._immediate_joiner_answer()
+
         if field_type == "numeric":
             if any(token in label_lower for token in ("salary", "ctc", "compensation", "package", "lpa")):
                 return self._format_salary(
@@ -907,7 +911,7 @@ class AutoApplyBot:
                     label,
                     validation_text=validation_text,
                 )
-            if any(token in label_lower for token in ("notice", "join", "joining", "day", "days")):
+            if self._is_notice_label(label_lower):
                 return self._format_number(
                     self._notice_value_for_label(label_lower),
                     label,
@@ -929,6 +933,9 @@ class AutoApplyBot:
         option_texts: list[tuple[str, str]],
     ) -> Optional[tuple[str, str]]:
         label_lower = label.lower()
+
+        if self._is_immediate_joiner_label(label_lower):
+            return self._boolean_option_choice(option_texts, self.is_immediate_joiner)
 
         if "language" in label_lower:
             for value, text in option_texts:
@@ -960,6 +967,24 @@ class AutoApplyBot:
             if normalized in yes_tokens or normalized.startswith("yes"):
                 return value, text
         return None
+
+    @staticmethod
+    def _no_like_option(option_texts: list[tuple[str, str]]) -> Optional[tuple[str, str]]:
+        no_tokens = ("no", "n", "not now", "nope")
+        for value, text in option_texts:
+            normalized = text.strip().lower()
+            if normalized in no_tokens or normalized.startswith("no"):
+                return value, text
+        return None
+
+    def _boolean_option_choice(
+        self,
+        option_texts: list[tuple[str, str]],
+        desired: bool,
+    ) -> Optional[tuple[str, str]]:
+        if desired:
+            return self._yes_like_option(option_texts)
+        return self._no_like_option(option_texts)
 
     @staticmethod
     def _match_numeric_option(
@@ -1015,6 +1040,9 @@ class AutoApplyBot:
             return max(round(notice_days / 30.0, 2), 0.0)
         return notice_days
 
+    def _immediate_joiner_answer(self) -> str:
+        return "Yes" if self.is_immediate_joiner else "No"
+
     def _estimate_total_experience_years(self) -> float:
         text = " ".join(
             part for part in (self.resume_data.summary, self.resume_data.raw_text) if part
@@ -1057,6 +1085,8 @@ class AutoApplyBot:
     ) -> str:
         if field_type == "text":
             return " ".join(str(value).strip().split())
+        if field_type == "immediate_joiner":
+            return self._immediate_joiner_answer()
 
         numeric = self._ensure_numeric_value(str(value))
         if numeric is None:
@@ -1096,6 +1126,42 @@ class AutoApplyBot:
     @classmethod
     def _ensure_numeric_value(cls, text: str) -> Optional[float]:
         return cls._number_from_text(text)
+
+    @staticmethod
+    def _is_immediate_joiner_label(text: str) -> bool:
+        normalized = text.lower()
+        phrases = (
+            "immediate join",
+            "immediate joine",
+            "join immediately",
+            "start immediately",
+            "available to join immediately",
+            "are you available to join immediately",
+            "can you start immediately",
+            "can you join immediately",
+            "immediate availability",
+            "immediate joiner",
+        )
+        return any(phrase in normalized for phrase in phrases)
+
+    @classmethod
+    def _is_notice_label(cls, text: str) -> bool:
+        normalized = text.lower()
+        if cls._is_immediate_joiner_label(normalized):
+            return False
+        if any(token in normalized for token in ("notice period", "serving notice", "notice")):
+            return True
+        join_prompts = (
+            "how soon can you join",
+            "when can you join",
+            "joining in",
+            "join in",
+            "earliest you can join",
+        )
+        time_tokens = ("day", "days", "month", "months", "period", "within", "timeline")
+        return any(prompt in normalized for prompt in join_prompts) and any(
+            token in normalized for token in time_tokens
+        )
 
     async def _wait_for_linkedin_transition(self, page: Page) -> None:
         try:

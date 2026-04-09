@@ -27,6 +27,7 @@ class JobSearchRequest(BaseModel):
     expected_ctc: Optional[float] = Field(default=None, ge=0)
     notice_days: Optional[float] = Field(default=None, ge=0)
     total_experience: Optional[float] = Field(default=None, ge=0)
+    is_immediate_joiner: bool = False
 
 
 class ResumeData(BaseModel):

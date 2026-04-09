@@ -302,6 +302,9 @@
                 <input type="number" id="total-experience" min="0" step="0.1" placeholder="e.g. 5" />
               </div>
             </div>
+            <div class="checkbox-group" style="margin-top: 12px;">
+              <label><input type="checkbox" id="is-immediate-joiner" /> Immediate Joiner</label>
+            </div>
             <div class="field-help">These values are used only for this user and this run.</div>
           </div>
 
@@ -419,6 +422,7 @@
       const expectedCtc = document.getElementById('expected-ctc').value.trim();
       const noticeDays = document.getElementById('notice-days').value.trim();
       const totalExperience = document.getElementById('total-experience').value.trim();
+      const isImmediateJoiner = document.getElementById('is-immediate-joiner').checked;
 
       if (!workModes) { alert('Select at least one work mode.'); return; }
       if (!portals) { alert('Select at least one portal.'); return; }
@@ -439,6 +443,7 @@
       if (expectedCtc) form.append('expected_ctc', expectedCtc);
       if (noticeDays) form.append('notice_days', noticeDays);
       if (totalExperience) form.append('total_experience', totalExperience);
+      form.append('is_immediate_joiner', String(isImmediateJoiner));
 
       try {
         const res = await fetch(`${API}/start-search`, { method: 'POST', body: form });
