@@ -23,6 +23,8 @@ class JobSearchRequest(BaseModel):
     work_modes: list[WorkMode] = Field(default=[WorkMode.REMOTE])
     portals: list[JobPortal] = Field(default=[JobPortal.LINKEDIN])
     max_applications: int = Field(default=25, ge=1, le=200)
+    phone_number: str = ""
+    country_code: str = ""
     current_ctc: Optional[float] = Field(default=None, ge=0)
     expected_ctc: Optional[float] = Field(default=None, ge=0)
     notice_days: Optional[float] = Field(default=None, ge=0)

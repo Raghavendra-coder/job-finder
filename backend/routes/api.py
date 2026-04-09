@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from pathlib import Path
 from typing import Any
@@ -82,6 +83,57 @@ def _parse_bool(raw: str, field_name: str) -> bool:
     raise ValueError(f"Invalid {field_name}")
 
 
+def validate_inputs(data: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+
+    phone = str(data.get("phone_number", "")).strip()
+    if not re.fullmatch(r"\d{10}", phone):
+        errors.append("Phone number must be exactly 10 digits")
+
+    country_code = str(data.get("country_code", "")).strip()
+    if not re.fullmatch(r"\+\d{1,4}", country_code):
+        errors.append("Country code must be like +91")
+
+    if len(str(data.get("job_description", "")).strip()) < 10:
+        errors.append("Job description is required")
+
+    work_modes = [item for item in str(data.get("work_modes", "")).split(",") if item.strip()]
+    if not work_modes:
+        errors.append("Select at least one work mode")
+
+    portals = [item for item in str(data.get("portals", "")).split(",") if item.strip()]
+    if not portals:
+        errors.append("Select at least one portal")
+
+    max_applications = data.get("max_applications")
+    try:
+        if int(max_applications) < 1:
+            errors.append("Max applications must be at least 1")
+    except (TypeError, ValueError):
+        errors.append("Max applications is invalid")
+
+    numeric_rules = (
+        ("current_ctc", "Current CTC must be greater than 0", lambda value: value > 0),
+        ("expected_ctc", "Expected CTC must be greater than 0", lambda value: value > 0),
+        ("total_experience", "Experience must be greater than or equal to 0", lambda value: value >= 0),
+        ("notice_days", "Notice period must be greater than or equal to 0", lambda value: value >= 0),
+    )
+    for field_name, message, predicate in numeric_rules:
+        raw = str(data.get(field_name, "")).strip()
+        if raw == "":
+            errors.append(message)
+            continue
+        try:
+            value = float(raw.replace(",", ""))
+        except ValueError:
+            errors.append(message)
+            continue
+        if not predicate(value):
+            errors.append(message)
+
+    return errors
+
+
 @router.post("/upload-resume")
 async def upload_resume(file: UploadFile = File(...)):
     if not file.filename:
@@ -119,6 +171,8 @@ async def start_search(
     portals: str = Form("linkedin"),
     max_applications: int = Form(25),
     resume_path: str = Form(""),
+    phone_number: str = Form(""),
+    country_code: str = Form(""),
     current_ctc: str = Form(""),
     expected_ctc: str = Form(""),
     notice_days: str = Form(""),
@@ -136,6 +190,27 @@ async def start_search(
     session_id = str(uuid.uuid4())[:8]
     session = _get_session(session_id)
     session.status = "starting"
+
+    normalized_phone_number = re.sub(r"\D", "", phone_number).strip()
+    normalized_country_code = country_code.strip()
+
+    validation_errors = validate_inputs({
+        "job_description": job_description,
+        "work_modes": work_modes,
+        "portals": portals,
+        "max_applications": max_applications,
+        "phone_number": normalized_phone_number,
+        "country_code": normalized_country_code,
+        "current_ctc": current_ctc,
+        "expected_ctc": expected_ctc,
+        "notice_days": notice_days,
+        "total_experience": total_experience,
+    })
+    if validation_errors:
+        return JSONResponse(
+            {"status": "error", "error": validation_errors[0], "errors": validation_errors},
+            status_code=400,
+        )
 
     wm_list = [WorkMode(m.strip()) for m in work_modes.split(",") if m.strip()]
     portal_list = [JobPortal(p.strip()) for p in portals.split(",") if p.strip()]
@@ -173,6 +248,8 @@ async def start_search(
         work_modes=wm_list,
         portals=portal_list,
         max_applications=max_applications,
+        phone_number=normalized_phone_number,
+        country_code=normalized_country_code,
         current_ctc=parsed_current_ctc,
         expected_ctc=parsed_expected_ctc,
         notice_days=parsed_notice_days,
@@ -237,6 +314,8 @@ async def _run_search(
             resume_data=resume_data,
             resume_path=resume_path,
             job_description=request.job_description,
+            phone_number=request.phone_number,
+            country_code=request.country_code,
             current_ctc=request.current_ctc,
             expected_ctc=request.expected_ctc,
             notice_days=request.notice_days,

@@ -65,6 +65,8 @@
 
     label { display: block; font-size: .85rem; color: var(--text-muted); margin-bottom: 6px; font-weight: 500; }
     input[type="file"],
+    input[type="text"],
+    input[type="tel"],
     input[type="number"],
     textarea, select {
       width: 100%;
@@ -107,6 +109,17 @@
       margin-top: 6px;
       font-size: .78rem;
       color: var(--text-muted);
+    }
+    .validation-box {
+      margin-top: 12px;
+      padding: 12px 14px;
+      border-radius: 8px;
+      border: 1px solid rgba(239,68,68,.35);
+      background: rgba(239,68,68,.1);
+      color: #fecaca;
+      font-size: .84rem;
+      line-height: 1.5;
+      white-space: pre-line;
     }
 
     .btn {
@@ -286,6 +299,14 @@
             <label>Application Profile</label>
             <div class="field-grid">
               <div>
+                <label for="phone-number">PHONE NUMBER</label>
+                <input type="tel" id="phone-number" inputmode="numeric" placeholder="10 digits" />
+              </div>
+              <div>
+                <label for="country-code">COUNTRY CODE</label>
+                <input type="text" id="country-code" placeholder="e.g. +91" />
+              </div>
+              <div>
                 <label for="current-ctc">CURRENT_CTC</label>
                 <input type="number" id="current-ctc" min="0" step="0.01" placeholder="e.g. 2800000" />
               </div>
@@ -306,10 +327,11 @@
               <label><input type="checkbox" id="is-immediate-joiner" /> Immediate Joiner</label>
             </div>
             <div class="field-help">These values are used only for this user and this run.</div>
+            <div id="validation-errors" class="validation-box hidden"></div>
           </div>
 
           <div class="btn-group">
-            <button class="btn btn-primary" id="btn-start" onclick="startSearch()">
+            <button class="btn btn-primary" id="btn-start" onclick="startSearch()" disabled>
               Start Job Search
             </button>
             <button class="btn btn-danger btn-sm hidden" id="btn-stop" onclick="stopSearch()">
@@ -360,6 +382,93 @@
     let currentSessionId = null;
     let pollInterval = null;
     let resumePath = '';
+    let parsedResumeData = null;
+
+    function normalizePhone(raw) {
+      return (raw || '').replace(/\D/g, '').slice(0, 10);
+    }
+
+    function normalizeCountryCode(raw) {
+      const digits = (raw || '').replace(/[^\d]/g, '').slice(0, 4);
+      return digits ? `+${digits}` : '';
+    }
+
+    function setValidationErrors(errors) {
+      const box = document.getElementById('validation-errors');
+      if (!errors.length) {
+        box.textContent = '';
+        box.classList.add('hidden');
+        return;
+      }
+      box.textContent = errors.join('\n');
+      box.classList.remove('hidden');
+    }
+
+    function syncProfileFieldFormatting() {
+      const phoneInput = document.getElementById('phone-number');
+      const countryCodeInput = document.getElementById('country-code');
+      const phone = normalizePhone(phoneInput.value);
+      const countryCode = normalizeCountryCode(countryCodeInput.value);
+      if (phoneInput.value !== phone) phoneInput.value = phone;
+      if (countryCodeInput.value !== countryCode) countryCodeInput.value = countryCode;
+    }
+
+    function getValidationErrors() {
+      syncProfileFieldFormatting();
+
+      const jd = document.getElementById('jd').value.trim();
+      const workModes = [...document.querySelectorAll('input[name="workmode"]:checked')].map(el => el.value);
+      const portals = [...document.querySelectorAll('input[name="portal"]:checked')].map(el => el.value);
+      const maxApps = Number(document.getElementById('max-apps').value);
+      const phone = document.getElementById('phone-number').value.trim();
+      const countryCode = document.getElementById('country-code').value.trim();
+      const currentCtc = Number(document.getElementById('current-ctc').value);
+      const expectedCtc = Number(document.getElementById('expected-ctc').value);
+      const noticeDaysRaw = document.getElementById('notice-days').value.trim();
+      const totalExperienceRaw = document.getElementById('total-experience').value.trim();
+      const noticeDays = Number(noticeDaysRaw);
+      const totalExperience = Number(totalExperienceRaw);
+
+      const errors = [];
+      if (!resumePath) errors.push('Upload and parse a resume first');
+      if (jd.length < 10) errors.push('Job description is required');
+      if (!workModes.length) errors.push('Select at least one work mode');
+      if (!portals.length) errors.push('Select at least one portal');
+      if (!Number.isFinite(maxApps) || maxApps < 1) errors.push('Max applications must be at least 1');
+      if (!/^\d{10}$/.test(phone)) errors.push('Phone number must be exactly 10 digits');
+      if (!/^\+\d{1,4}$/.test(countryCode)) errors.push('Country code must be like +91');
+      if (!Number.isFinite(currentCtc) || currentCtc <= 0) errors.push('Current CTC must be greater than 0');
+      if (!Number.isFinite(expectedCtc) || expectedCtc <= 0) errors.push('Expected CTC must be greater than 0');
+      if (noticeDaysRaw === '' || !Number.isFinite(noticeDays) || noticeDays < 0) {
+        errors.push('Notice period must be greater than or equal to 0');
+      }
+      if (totalExperienceRaw === '' || !Number.isFinite(totalExperience) || totalExperience < 0) {
+        errors.push('Experience must be greater than or equal to 0');
+      }
+
+      return errors;
+    }
+
+    function updateFormValidation(showErrors = false) {
+      const errors = getValidationErrors();
+      document.getElementById('btn-start').disabled = errors.length > 0;
+      if (showErrors || errors.length === 0) {
+        setValidationErrors(errors);
+      }
+      return errors;
+    }
+
+    function prefillContactFields(resumeData) {
+      if (!resumeData || !resumeData.phone) return;
+      const rawPhone = String(resumeData.phone).trim();
+      const phoneInput = document.getElementById('phone-number');
+      const countryCodeInput = document.getElementById('country-code');
+      const normalizedPhone = normalizePhone(rawPhone);
+      const normalizedCountryCode = normalizeCountryCode(rawPhone.startsWith('+') ? rawPhone : '');
+
+      if (!phoneInput.value && normalizedPhone) phoneInput.value = normalizedPhone;
+      if (!countryCodeInput.value && normalizedCountryCode) countryCodeInput.value = normalizedCountryCode;
+    }
 
     async function uploadResume() {
       const fileInput = document.getElementById('resume');
@@ -386,7 +495,9 @@
         }
 
         resumePath = data.resume_path;
+        parsedResumeData = data.data || null;
         const d = data.data;
+        prefillContactFields(d);
 
         let html = `<strong>${d.name || 'Name not detected'}</strong>`;
         if (d.email) html += ` &middot; ${d.email}`;
@@ -401,6 +512,7 @@
         info.innerHTML = html;
         info.classList.remove('hidden');
         addLog('Resume parsed successfully');
+        updateFormValidation();
       } catch (err) {
         alert('Upload error: ' + err.message);
       } finally {
@@ -410,22 +522,22 @@
     }
 
     async function startSearch() {
-      const jd = document.getElementById('jd').value.trim();
-      if (!jd) { alert('Enter a job description or keywords.'); return; }
+      const validationErrors = updateFormValidation(true);
+      if (validationErrors.length) return;
 
+      const jd = document.getElementById('jd').value.trim();
       const workModes = [...document.querySelectorAll('input[name="workmode"]:checked')]
         .map(el => el.value).join(',');
       const portals = [...document.querySelectorAll('input[name="portal"]:checked')]
         .map(el => el.value).join(',');
       const maxApps = document.getElementById('max-apps').value;
+      const phoneNumber = document.getElementById('phone-number').value.trim();
+      const countryCode = document.getElementById('country-code').value.trim();
       const currentCtc = document.getElementById('current-ctc').value.trim();
       const expectedCtc = document.getElementById('expected-ctc').value.trim();
       const noticeDays = document.getElementById('notice-days').value.trim();
       const totalExperience = document.getElementById('total-experience').value.trim();
       const isImmediateJoiner = document.getElementById('is-immediate-joiner').checked;
-
-      if (!workModes) { alert('Select at least one work mode.'); return; }
-      if (!portals) { alert('Select at least one portal.'); return; }
 
       const btn = document.getElementById('btn-start');
       const stopBtn = document.getElementById('btn-stop');
@@ -439,6 +551,8 @@
       form.append('portals', portals);
       form.append('max_applications', maxApps);
       if (resumePath) form.append('resume_path', resumePath);
+      form.append('phone_number', phoneNumber);
+      form.append('country_code', countryCode);
       if (currentCtc) form.append('current_ctc', currentCtc);
       if (expectedCtc) form.append('expected_ctc', expectedCtc);
       if (noticeDays) form.append('notice_days', noticeDays);
@@ -450,21 +564,24 @@
         const data = await res.json();
 
         if (!res.ok) {
-          alert(data.error || 'Failed to start search');
+          setValidationErrors(data.errors || [data.error || 'Failed to start search']);
           btn.disabled = false;
           btn.textContent = 'Start Job Search';
+          stopBtn.classList.add('hidden');
           return;
         }
 
         currentSessionId = data.session_id;
+        setValidationErrors([]);
         setStatus('running');
         addLog(`Search started (session: ${currentSessionId})`);
 
         startPolling();
       } catch (err) {
-        alert('Error: ' + err.message);
+        setValidationErrors(['Error: ' + err.message]);
         btn.disabled = false;
         btn.textContent = 'Start Job Search';
+        stopBtn.classList.add('hidden');
       }
     }
 
@@ -486,9 +603,9 @@
 
     function stopPolling() {
       if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
-      document.getElementById('btn-start').disabled = false;
       document.getElementById('btn-start').textContent = 'Start Job Search';
       document.getElementById('btn-stop').classList.add('hidden');
+      updateFormValidation();
     }
 
     let lastLogCount = 0;
@@ -519,6 +636,30 @@
         }
       } catch { /* ignore poll errors */ }
     }
+
+    document.addEventListener('DOMContentLoaded', () => {
+      const validationInputs = [
+        'jd',
+        'max-apps',
+        'phone-number',
+        'country-code',
+        'current-ctc',
+        'expected-ctc',
+        'notice-days',
+        'total-experience',
+        'is-immediate-joiner',
+      ];
+      validationInputs.forEach((id) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.addEventListener('input', () => updateFormValidation(true));
+        el.addEventListener('change', () => updateFormValidation(true));
+      });
+      document.querySelectorAll('input[name="workmode"], input[name="portal"]').forEach((el) => {
+        el.addEventListener('change', () => updateFormValidation(true));
+      });
+      updateFormValidation();
+    });
 
     function renderApplications(apps) {
       const tbody = document.getElementById('app-table-body');

@@ -66,6 +66,8 @@ class LinkedInCrawler(BaseCrawler):
                     if is_split_layout:
                         await self._activate_split_layout_card(card)
                         detail_panel = await self._get_detail_panel()
+                        if detail_panel is None:
+                            continue
 
                     job = await self._parse_card(card, detail_panel)
                     if job and job.url not in seen_urls:
@@ -208,6 +210,14 @@ class LinkedInCrawler(BaseCrawler):
 
     async def _activate_split_layout_card(self, card) -> None:
         assert self._page is not None
+        previous_title = await self._current_detail_title()
+        expected_job_id = await self._locator_attribute(card, "data-job-id")
+        if not expected_job_id:
+            href = await self._locator_attribute(
+                card.locator("a[href*='/jobs/view/'], a[href*='currentJobId=']").first,
+                "href",
+            )
+            expected_job_id = self._extract_job_id(href)
         try:
             await card.scroll_into_view_if_needed()
         except Exception:
@@ -222,7 +232,7 @@ class LinkedInCrawler(BaseCrawler):
             except Exception:
                 return
 
-        await self._wait_for_detail_panel()
+        await self._wait_for_detail_panel_change(previous_title, expected_job_id)
 
     async def _wait_for_detail_panel(self) -> None:
         assert self._page is not None
@@ -235,6 +245,35 @@ class LinkedInCrawler(BaseCrawler):
             pass
         await human_delay(0.6, 1.2)
 
+    async def _wait_for_detail_panel_change(self, previous_title: str, expected_job_id: str = "") -> None:
+        assert self._page is not None
+        await self._wait_for_detail_panel()
+        try:
+            await self._page.wait_for_function(
+                """
+                ({ oldTitle, expectedId }) => {
+                    const root = document.querySelector(
+                        '.jobs-search__job-details, .jobs-details, .jobs-details__main-content'
+                    );
+                    if (!root) return false;
+                    const titleEl = root.querySelector(
+                        'h1, .job-details-jobs-unified-top-card__job-title, .jobs-unified-top-card__job-title'
+                    );
+                    const linkEl = root.querySelector("a[href*='/jobs/view/'], a[href*='currentJobId=']");
+                    const title = (titleEl?.innerText || '').trim();
+                    const href = linkEl?.getAttribute('href') || '';
+                    if (expectedId && href.includes(expectedId)) return true;
+                    if (!oldTitle) return !!title;
+                    return !!title && title !== oldTitle;
+                }
+                """,
+                arg={"oldTitle": previous_title, "expectedId": expected_job_id},
+                timeout=7000,
+            )
+        except Exception:
+            pass
+        await human_delay(0.3, 0.6)
+
     async def _get_detail_panel(self):
         assert self._page is not None
         panel = self._page.locator(
@@ -246,6 +285,15 @@ class LinkedInCrawler(BaseCrawler):
         except Exception:
             pass
         return None
+
+    async def _current_detail_title(self) -> str:
+        panel = await self._get_detail_panel()
+        if panel is None:
+            return ""
+        title = panel.locator(
+            "h1, .job-details-jobs-unified-top-card__job-title, .jobs-unified-top-card__job-title"
+        ).first
+        return await self._locator_text(title)
 
     @staticmethod
     async def _locator_text(locator) -> str:
@@ -261,6 +309,16 @@ class LinkedInCrawler(BaseCrawler):
             return (await locator.get_attribute(name)) or ""
         except Exception:
             return ""
+
+    @staticmethod
+    def _extract_job_id(url: str) -> str:
+        match = re.search(r"/jobs/view/(\d+)", url)
+        if match:
+            return match.group(1)
+        match = re.search(r"[?&]currentJobId=(\d+)", url)
+        if match:
+            return match.group(1)
+        return ""
 
     @staticmethod
     def _detect_work_mode(text: str) -> WorkMode:

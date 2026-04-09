@@ -27,6 +27,8 @@ class AutoApplyBot:
         resume_data: ResumeData,
         resume_path: Path,
         job_description: str,
+        phone_number: str = "",
+        country_code: str = "",
         current_ctc: Optional[float] = None,
         expected_ctc: Optional[float] = None,
         notice_days: Optional[float] = None,
@@ -37,6 +39,8 @@ class AutoApplyBot:
         self.resume_data = resume_data
         self.resume_path = resume_path
         self.job_description = job_description
+        self.phone_number = phone_number
+        self.country_code = country_code
         self.current_ctc = current_ctc
         self.expected_ctc = expected_ctc
         self.notice_days = notice_days
@@ -240,12 +244,6 @@ class AutoApplyBot:
         container=None,
         allow_page_fallback: bool = True,
     ):
-        search_roots = []
-        if container is not None:
-            search_roots.append(container)
-        if allow_page_fallback and page not in search_roots:
-            search_roots.append(page)
-
         selectors = [
             "button.jobs-apply-button",
             "button.jobs-apply-button--top-card",
@@ -253,6 +251,22 @@ class AutoApplyBot:
             "button:has-text('Easy Apply')",
             "[data-control-name='jobdetails_topcard_inapply']",
         ]
+
+        if container is not None and container is not page:
+            for sel in selectors:
+                candidate = container.locator(sel).first
+                try:
+                    await candidate.wait_for(state="visible", timeout=5000)
+                    return candidate
+                except Exception:
+                    continue
+
+        search_roots = []
+        if container is not None:
+            search_roots.append(container)
+        if allow_page_fallback and page not in search_roots:
+            search_roots.append(page)
+
         for root in search_roots:
             for sel in selectors:
                 btn = root.locator(sel).first
@@ -457,11 +471,17 @@ class AutoApplyBot:
     async def _fill_visible_fields(self, container, app_log: ApplicationLog) -> None:
         name = self.resume_data.name or APPLICANT_NAME
         email = self.resume_data.email or APPLICANT_EMAIL
-        phone = self.resume_data.phone or APPLICANT_PHONE
+        phone = self.phone_number or self.resume_data.phone or APPLICANT_PHONE
+        country_code = self.country_code
 
         await self._safe_fill(container, 'input[name*="name" i], input[aria-label*="name" i]', name)
         await self._safe_fill(container, 'input[type="email"], input[name*="email" i]', email)
         await self._safe_fill(container, 'input[type="tel"], input[name*="phone" i]', phone)
+        await self._safe_fill(
+            container,
+            'input[name*="country" i], input[name*="dial" i], input[aria-label*="country code" i], input[placeholder*="country code" i]',
+            country_code,
+        )
 
         question_inputs = container.locator(
             "input:not([type='hidden']):not([type='file']):not([type='checkbox']):not([type='radio']):not([type='submit']):not([type='button']), "
@@ -482,7 +502,13 @@ class AutoApplyBot:
             if existing.strip():
                 continue
 
-            direct_value = self._contact_value_for_label(field_context or label, name, email, phone)
+            direct_value = self._contact_value_for_label(
+                field_context or label,
+                name,
+                email,
+                phone,
+                country_code,
+            )
             if direct_value:
                 try:
                     await inp.fill(direct_value)
@@ -1193,19 +1219,20 @@ class AutoApplyBot:
                 card = cards.nth(idx)
                 card_id = await card.get_attribute("data-job-id") or ""
                 if target_id == card_id:
-                    await self._click_linkedin_card(page, card)
+                    await self._click_linkedin_card(page, card, expected_job_id=target_id)
                     break
 
                 link = card.locator("a[href*='/jobs/view/'], a[href*='currentJobId=']").first
                 href = await self._locator_attribute(link, "href")
                 if target_id and target_id in href:
-                    await self._click_linkedin_card(page, card)
+                    await self._click_linkedin_card(page, card, expected_job_id=target_id)
                     break
 
         if not await self._is_visible(detail_panel, timeout=2000):
             cards = page.locator(".jobs-search-results__list-item, .job-card-container, [data-job-id]")
             if await cards.count() > 0:
-                await self._click_linkedin_card(page, cards.first)
+                fallback_id = await self._locator_attribute(cards.first, "data-job-id")
+                await self._click_linkedin_card(page, cards.first, expected_job_id=fallback_id)
 
         if await self._is_visible(detail_panel, timeout=2000):
             return detail_panel
@@ -1343,16 +1370,25 @@ class AutoApplyBot:
         except Exception:
             return ""
 
-    async def _click_linkedin_card(self, page: Page, card) -> None:
+    async def _click_linkedin_card(self, page: Page, card, expected_job_id: str = "") -> None:
+        previous_title = await self._current_linkedin_detail_title(page)
+        if not expected_job_id:
+            expected_job_id = await self._locator_attribute(card, "data-job-id")
+        if not expected_job_id:
+            href = await self._locator_attribute(
+                card.locator("a[href*='/jobs/view/'], a[href*='currentJobId=']").first,
+                "href",
+            )
+            expected_job_id = self._extract_linkedin_job_id(href)
         click_target = card.locator("a, button").first
         if await self._click_if_enabled(click_target):
-            await self._wait_for_linkedin_transition(page)
+            await self._wait_for_linkedin_job_change(page, previous_title, expected_job_id)
             return
         try:
             await card.click(timeout=2500)
         except Exception:
             return
-        await self._wait_for_linkedin_transition(page)
+        await self._wait_for_linkedin_job_change(page, previous_title, expected_job_id)
 
     @staticmethod
     def _extract_linkedin_job_id(url: str) -> str:
@@ -1402,11 +1438,73 @@ class AutoApplyBot:
 
         return " ".join(texts).strip()
 
+    async def _current_linkedin_detail_title(self, page: Page) -> str:
+        detail_panel = page.locator(
+            ".jobs-search__job-details, .jobs-details, .jobs-details__main-content"
+        ).first
+        title = detail_panel.locator(
+            "h1, .job-details-jobs-unified-top-card__job-title, .jobs-unified-top-card__job-title"
+        ).first
+        if await self._is_visible(title, timeout=500):
+            try:
+                return " ".join((await title.inner_text()).strip().split())
+            except Exception:
+                return ""
+        return ""
+
+    async def _wait_for_linkedin_job_change(
+        self,
+        page: Page,
+        previous_title: str,
+        expected_job_id: str = "",
+    ) -> None:
+        try:
+            await page.wait_for_selector(
+                ".jobs-search__job-details, .jobs-details, .jobs-details__main-content",
+                timeout=5000,
+            )
+        except Exception:
+            pass
+
+        try:
+            await page.wait_for_function(
+                """
+                ({ oldTitle, expectedId }) => {
+                    const root = document.querySelector(
+                        '.jobs-search__job-details, .jobs-details, .jobs-details__main-content'
+                    );
+                    if (!root) return false;
+                    const titleEl = root.querySelector(
+                        'h1, .job-details-jobs-unified-top-card__job-title, .jobs-unified-top-card__job-title'
+                    );
+                    const linkEl = root.querySelector("a[href*='/jobs/view/'], a[href*='currentJobId=']");
+                    const title = (titleEl?.innerText || '').trim();
+                    const href = linkEl?.getAttribute('href') || '';
+                    if (expectedId && href.includes(expectedId)) return true;
+                    if (!oldTitle) return !!title;
+                    return !!title && title !== oldTitle;
+                }
+                """,
+                arg={"oldTitle": previous_title, "expectedId": expected_job_id},
+                timeout=7000,
+            )
+        except Exception:
+            pass
+        await self._wait_for_linkedin_transition(page)
+
     @staticmethod
-    def _contact_value_for_label(label: str, name: str, email: str, phone: str) -> str:
+    def _contact_value_for_label(
+        label: str,
+        name: str,
+        email: str,
+        phone: str,
+        country_code: str,
+    ) -> str:
         normalized = label.lower()
         if any(token in normalized for token in ("email", "e-mail", "mail")):
             return email
+        if any(token in normalized for token in ("country code", "dial code", "calling code")):
+            return country_code
         if any(token in normalized for token in ("phone", "mobile", "contact number")):
             return phone
         if "name" in normalized:
