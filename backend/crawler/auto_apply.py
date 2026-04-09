@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import asyncio
 import re
+from datetime import date
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -27,11 +27,19 @@ class AutoApplyBot:
         resume_data: ResumeData,
         resume_path: Path,
         job_description: str,
+        current_ctc: Optional[float] = None,
+        expected_ctc: Optional[float] = None,
+        notice_days: Optional[float] = None,
+        total_experience: Optional[float] = None,
         on_status: Optional[Callable[[str], None]] = None,
     ):
         self.resume_data = resume_data
         self.resume_path = resume_path
         self.job_description = job_description
+        self.current_ctc = current_ctc
+        self.expected_ctc = expected_ctc
+        self.notice_days = notice_days
+        self.total_experience = total_experience
         self.on_status = on_status or (lambda _: None)
 
     async def _emit(self, msg: str) -> None:
@@ -424,7 +432,8 @@ class AutoApplyBot:
         await self._safe_fill(container, 'input[type="tel"], input[name*="phone" i]', phone)
 
         question_inputs = container.locator(
-            'input[type="text"], input:not([type]), textarea:not([name*="cover" i])'
+            "input:not([type='hidden']):not([type='file']):not([type='checkbox']):not([type='radio']):not([type='submit']):not([type='button']), "
+            "textarea:not([name*='cover' i])"
         )
         count = await question_inputs.count()
         for idx in range(count):
@@ -433,6 +442,8 @@ class AutoApplyBot:
                 continue
 
             label = await self._get_label(container, inp)
+            placeholder = await self._locator_attribute(inp, "placeholder")
+            input_type = (await self._locator_attribute(inp, "type")).lower()
             existing = await self._get_field_value(inp)
             if existing.strip():
                 continue
@@ -446,17 +457,74 @@ class AutoApplyBot:
                     pass
                 continue
 
-            if not label:
+            field_label = label or placeholder or "Screening question"
+            validation_text = await self._get_field_validation_text(inp)
+            field_type = self._classify_field(
+                field_label,
+                placeholder=placeholder,
+                input_type=input_type,
+                validation_text=validation_text,
+            )
+
+            if field_type == "text" and not field_label:
                 continue
 
-            answer = await generate_answer(label, self.resume_data, self.job_description)
-            if answer:
-                try:
-                    await inp.fill(answer)
-                    app_log.answers[label] = answer
-                    await human_delay(0.3, 0.7)
-                except Exception:
-                    continue
+            if field_type == "text":
+                value = await generate_answer(field_label, self.resume_data, self.job_description)
+            else:
+                value = self._rule_based_field_value(
+                    field_type,
+                    field_label,
+                    validation_text=validation_text,
+                )
+
+            if not value:
+                continue
+
+            value = self._sanitize_field_value(
+                value,
+                field_type=field_type,
+                label=field_label,
+                validation_text=validation_text,
+            )
+            logger.info("Field: %s | Type: %s | Value: %s", field_label, field_type, value)
+
+            try:
+                await inp.fill(value)
+                await human_delay(0.3, 0.7)
+            except Exception:
+                continue
+
+            retry_error = await self._get_field_validation_text(inp)
+            if retry_error:
+                retry_type = self._classify_field(
+                    field_label,
+                    placeholder=placeholder,
+                    input_type=input_type,
+                    validation_text=retry_error,
+                )
+                if retry_type != "text":
+                    retry_value = self._rule_based_field_value(
+                        retry_type,
+                        field_label,
+                        validation_text=retry_error,
+                    )
+                    retry_value = self._sanitize_field_value(
+                        retry_value or value,
+                        field_type="numeric",
+                        label=field_label,
+                        validation_text=retry_error,
+                    ) or "1"
+                    if retry_value != value:
+                        try:
+                            await inp.fill(retry_value)
+                            await human_delay(0.3, 0.5)
+                            value = retry_value
+                            field_type = retry_type
+                        except Exception:
+                            pass
+
+            app_log.answers[field_label] = value
 
         await self._handle_select_fields(container, app_log)
 
@@ -482,17 +550,9 @@ class AutoApplyBot:
             if not option_texts or not label:
                 continue
 
-            choices = ", ".join(text for _, text in option_texts)
-            question = f"{label} (choose one: {choices})"
-            answer = await generate_answer(question, self.resume_data, self.job_description)
-
-            best_val = option_texts[-1][0]
-            answer_lower = answer.lower()
-            for val, text in option_texts:
-                text_lower = text.lower()
-                if text_lower in answer_lower or answer_lower in text_lower:
-                    best_val = val
-                    break
+            best_val, answer = await self._resolve_select_answer(label, option_texts)
+            if not best_val:
+                continue
 
             try:
                 await sel.select_option(value=best_val)
@@ -550,17 +610,9 @@ class AutoApplyBot:
             if not options:
                 continue
 
-            choices = ", ".join(text for _, text in options)
-            question = f"{label} (choose one: {choices})"
-            answer = await generate_answer(question, self.resume_data, self.job_description)
-
-            answer_lower = answer.lower()
-            chosen = options[-1][0]
-            for radio, text in options:
-                text_lower = text.lower()
-                if text_lower in answer_lower or answer_lower in text_lower:
-                    chosen = radio
-                    break
+            chosen, answer = await self._resolve_radio_answer(label, options)
+            if chosen is None or not answer:
+                continue
 
             try:
                 await chosen.check()
@@ -653,6 +705,338 @@ class AutoApplyBot:
 
         name = await element.get_attribute("name") or ""
         return name.replace("_", " ").replace("-", " ").strip()
+
+    async def _resolve_select_answer(
+        self,
+        label: str,
+        option_texts: list[tuple[str, str]],
+    ) -> tuple[str, str]:
+        rule_based = self._rule_based_option_choice(label, option_texts)
+        if rule_based is not None:
+            logger.info("Field: %s | Type: select | Value: %s", label, rule_based[1])
+            return rule_based
+
+        choices = ", ".join(text for _, text in option_texts)
+        question = f"{label} (choose one: {choices})"
+        answer = await generate_answer(question, self.resume_data, self.job_description)
+
+        best_val, best_text = option_texts[-1]
+        answer_lower = answer.lower().strip()
+        if answer_lower:
+            for val, text in option_texts:
+                text_lower = text.lower()
+                if text_lower in answer_lower or answer_lower in text_lower:
+                    best_val, best_text = val, text
+                    break
+
+        selected_answer = answer or best_text
+        logger.info("Field: %s | Type: select | Value: %s", label, selected_answer)
+        return best_val, selected_answer
+
+    async def _resolve_radio_answer(
+        self,
+        label: str,
+        options: list[tuple[Locator, str]],
+    ) -> tuple[Optional[Locator], str]:
+        option_texts = [(str(idx), text) for idx, (_, text) in enumerate(options)]
+        rule_based = self._rule_based_option_choice(label, option_texts)
+        if rule_based is not None:
+            selected_idx = int(rule_based[0])
+            logger.info("Field: %s | Type: radio | Value: %s", label, rule_based[1])
+            return options[selected_idx][0], rule_based[1]
+
+        choices = ", ".join(text for _, text in options)
+        question = f"{label} (choose one: {choices})"
+        answer = await generate_answer(question, self.resume_data, self.job_description)
+
+        answer_lower = answer.lower().strip()
+        if answer_lower:
+            for radio, text in options:
+                text_lower = text.lower()
+                if text_lower in answer_lower or answer_lower in text_lower:
+                    selected_answer = answer or text
+                    logger.info("Field: %s | Type: radio | Value: %s", label, selected_answer)
+                    return radio, selected_answer
+
+        selected_answer = answer or options[-1][1]
+        logger.info("Field: %s | Type: radio | Value: %s", label, selected_answer)
+        return options[-1][0], selected_answer
+
+    async def _get_field_validation_text(self, field) -> str:
+        for ancestor_xpath in (
+            "xpath=ancestor::*[contains(@class,'fb-form-element')][1]",
+            "xpath=ancestor::*[contains(@class,'jobs-easy-apply-form-section__grouping')][1]",
+            "xpath=ancestor::div[1]",
+        ):
+            container = field.locator(ancestor_xpath).first
+            if not await self._is_visible(container, timeout=100):
+                continue
+
+            errors = container.locator(
+                ".artdeco-inline-feedback__message, .artdeco-inline-feedback--error"
+            )
+            count = await errors.count()
+            for idx in range(min(count, 3)):
+                error = errors.nth(idx)
+                if not await self._is_visible(error, timeout=100):
+                    continue
+                try:
+                    text = (await error.inner_text()).strip()
+                except Exception:
+                    text = ""
+                if text:
+                    return text
+
+        aria_invalid = await self._locator_attribute(field, "aria-invalid")
+        return "invalid" if aria_invalid == "true" else ""
+
+    @staticmethod
+    def _classify_field(
+        label: str,
+        placeholder: str = "",
+        input_type: str = "",
+        validation_text: str = "",
+    ) -> str:
+        text = " ".join(
+            part for part in (label, placeholder, validation_text) if part
+        ).lower()
+        input_type = (input_type or "").lower()
+
+        if any(token in text for token in ("ctc", "salary", "compensation", "package", "lpa")):
+            return "salary"
+        if "notice period" in text or ("notice" in text and any(token in text for token in ("day", "days", "month", "months", "period"))):
+            return "notice"
+        if any(token in text for token in ("overall exp", "overall experience", "years of experience", "years of exp", "experience")):
+            return "experience"
+        if input_type in {"number", "range"}:
+            return "numeric"
+        if "decimal number" in text or "whole number" in text:
+            return "numeric"
+        if re.search(r"\bexp\b", text) or re.search(r"\byears?\b", text):
+            return "numeric"
+        return "text"
+
+    def _rule_based_field_value(
+        self,
+        field_type: str,
+        label: str,
+        validation_text: str = "",
+    ) -> str:
+        label_lower = label.lower()
+
+        if field_type == "salary":
+            return self._format_salary(
+                self._salary_value_for_label(label_lower),
+                label,
+                validation_text=validation_text,
+            )
+
+        if field_type == "experience":
+            return self._format_number(
+                self._experience_value_for_label(label_lower),
+                label,
+                validation_text=validation_text,
+            )
+
+        if field_type == "notice":
+            return self._format_number(
+                self._notice_value_for_label(label_lower),
+                label,
+                validation_text=validation_text,
+            )
+
+        if field_type == "numeric":
+            if any(token in label_lower for token in ("salary", "ctc", "compensation", "package", "lpa")):
+                return self._format_salary(
+                    self._salary_value_for_label(label_lower),
+                    label,
+                    validation_text=validation_text,
+                )
+            if "notice" in label_lower:
+                return self._format_number(
+                    self._notice_value_for_label(label_lower),
+                    label,
+                    validation_text=validation_text,
+                )
+            if any(token in label_lower for token in ("experience", "exp", "year", "years")):
+                return self._format_number(
+                    self._experience_value_for_label(label_lower),
+                    label,
+                    validation_text=validation_text,
+                )
+            return self._format_number(1, label, validation_text=validation_text)
+
+        return ""
+
+    def _rule_based_option_choice(
+        self,
+        label: str,
+        option_texts: list[tuple[str, str]],
+    ) -> Optional[tuple[str, str]]:
+        label_lower = label.lower()
+
+        if "language" in label_lower:
+            for value, text in option_texts:
+                if "english" in text.lower():
+                    return value, text
+
+        if any(
+            token in label_lower
+            for token in ("hybrid", "relocation", "relocate", "comfortable", "willing", "authorized", "legal", "work permit", "commute", "travel")
+        ):
+            yes_like = self._yes_like_option(option_texts)
+            if yes_like is not None:
+                return yes_like
+
+        field_type = self._classify_field(label)
+        if field_type in {"salary", "experience", "notice", "numeric"}:
+            numeric_value = self._rule_based_field_value(field_type, label)
+            numeric_match = self._match_numeric_option(option_texts, numeric_value)
+            if numeric_match is not None:
+                return numeric_match
+
+        return None
+
+    @staticmethod
+    def _yes_like_option(option_texts: list[tuple[str, str]]) -> Optional[tuple[str, str]]:
+        yes_tokens = ("yes", "y", "comfortable", "willing", "sure", "ok", "okay")
+        for value, text in option_texts:
+            normalized = text.strip().lower()
+            if normalized in yes_tokens or normalized.startswith("yes"):
+                return value, text
+        return None
+
+    @staticmethod
+    def _match_numeric_option(
+        option_texts: list[tuple[str, str]],
+        target_value: str,
+    ) -> Optional[tuple[str, str]]:
+        target_number = AutoApplyBot._number_from_text(target_value)
+        if target_number is None:
+            return None
+
+        best_match: Optional[tuple[str, str]] = None
+        best_diff = float("inf")
+        for value, text in option_texts:
+            numbers = [float(match) for match in re.findall(r"\d+(?:\.\d+)?", text)]
+            if not numbers:
+                continue
+            if len(numbers) >= 2:
+                low, high = min(numbers[0], numbers[1]), max(numbers[0], numbers[1])
+                if low <= target_number <= high:
+                    return value, text
+            closest = min(numbers, key=lambda num: abs(num - target_number))
+            diff = abs(closest - target_number)
+            if diff < best_diff:
+                best_diff = diff
+                best_match = (value, text)
+
+        return best_match
+
+    def _salary_value_for_label(self, label_lower: str) -> float:
+        if any(token in label_lower for token in ("expected", "expecting", "desired")):
+            return self.expected_ctc or self.current_ctc or 1.0
+        if any(token in label_lower for token in ("current", "present", "existing", "fixed", "fix", "annual")):
+            return self.current_ctc or self.expected_ctc or 1.0
+        return self.expected_ctc or self.current_ctc or 1.0
+
+    def _experience_value_for_label(self, label_lower: str) -> float:
+        if (self.total_experience or 0) > 0:
+            return float(self.total_experience or 0)
+
+        years = self._estimate_total_experience_years()
+        if years > 0:
+            return years
+
+        if any(skill.lower() in label_lower for skill in self.resume_data.skills):
+            return max(years, 1.0)
+
+        return max(years, 1.0)
+
+    def _notice_value_for_label(self, label_lower: str) -> float:
+        notice_days = self.notice_days if self.notice_days is not None else 30.0
+        notice_days = notice_days if notice_days >= 0 else 0.0
+        if "month" in label_lower:
+            return max(round(notice_days / 30.0, 2), 0.0)
+        return notice_days
+
+    def _estimate_total_experience_years(self) -> float:
+        text = " ".join(
+            part for part in (self.resume_data.summary, self.resume_data.raw_text) if part
+        )
+        matches = [
+            float(match)
+            for match in re.findall(r"(\d+(?:\.\d+)?)\+?\s+(?:years?|yrs?)", text, flags=re.I)
+        ]
+        if matches:
+            return max(matches)
+
+        current_year = date.today().year
+        ranges: list[float] = []
+        starts: list[int] = []
+        for exp in self.resume_data.experience:
+            duration = exp.duration or ""
+            years = [int(year) for year in re.findall(r"(?:19|20)\d{2}", duration)]
+            if years:
+                start = years[0]
+                end = years[1] if len(years) > 1 else current_year
+                if re.search(r"present|current", duration, flags=re.I):
+                    end = current_year
+                starts.append(start)
+                ranges.append(max(float(end - start), 0.0))
+
+        if starts:
+            ranges.append(max(float(current_year - min(starts)), 0.0))
+
+        if ranges:
+            return max(ranges)
+
+        return float(len(self.resume_data.experience))
+
+    def _sanitize_field_value(
+        self,
+        value: str,
+        field_type: str,
+        label: str,
+        validation_text: str = "",
+    ) -> str:
+        if field_type == "text":
+            return " ".join(str(value).strip().split())
+
+        numeric = self._number_from_text(str(value))
+        if numeric is None:
+            numeric = 1.0
+        if numeric <= 0 and "larger than 0.0" in validation_text.lower():
+            numeric = 1.0
+        return self._format_number(numeric, label, validation_text=validation_text)
+
+    def _format_salary(self, value: float, label: str, validation_text: str = "") -> str:
+        label_lower = label.lower()
+        if any(token in label_lower for token in ("lpa", "lakh", "lakhs")) and value > 1000:
+            value = value / 100000.0
+        return self._format_number(value, label, validation_text=validation_text)
+
+    @staticmethod
+    def _format_number(value: float, label: str, validation_text: str = "") -> str:
+        allow_decimal = (
+            "decimal" in validation_text.lower()
+            or any(token in label.lower() for token in ("lpa", "salary", "ctc", "compensation"))
+        )
+        if allow_decimal:
+            formatted = f"{float(value):.2f}".rstrip("0").rstrip(".")
+            return formatted or "0"
+        rounded = int(round(float(value)))
+        return str(max(rounded, 0))
+
+    @staticmethod
+    def _number_from_text(text: str) -> Optional[float]:
+        match = re.search(r"\d+(?:\.\d+)?", text)
+        if not match:
+            return None
+        try:
+            return float(match.group(0))
+        except ValueError:
+            return None
 
     async def _wait_for_linkedin_transition(self, page: Page) -> None:
         try:

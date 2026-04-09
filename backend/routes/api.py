@@ -60,6 +60,19 @@ def _build_search_query(job_description: str) -> str:
     return first_line[:80] or job_description[:80]
 
 
+def _parse_optional_float(raw: str, field_name: str) -> float | None:
+    value = raw.strip()
+    if not value:
+        return None
+    try:
+        parsed = float(value.replace(",", ""))
+    except ValueError as exc:
+        raise ValueError(f"Invalid {field_name}") from exc
+    if parsed < 0:
+        raise ValueError(f"{field_name} must be non-negative")
+    return parsed
+
+
 @router.post("/upload-resume")
 async def upload_resume(file: UploadFile = File(...)):
     if not file.filename:
@@ -97,6 +110,10 @@ async def start_search(
     portals: str = Form("linkedin"),
     max_applications: int = Form(25),
     resume_path: str = Form(""),
+    current_ctc: str = Form(""),
+    expected_ctc: str = Form(""),
+    notice_days: str = Form(""),
+    total_experience: str = Form(""),
 ):
     global _active_task
 
@@ -112,6 +129,17 @@ async def start_search(
 
     wm_list = [WorkMode(m.strip()) for m in work_modes.split(",") if m.strip()]
     portal_list = [JobPortal(p.strip()) for p in portals.split(",") if p.strip()]
+
+    try:
+        parsed_current_ctc = _parse_optional_float(current_ctc, "CURRENT_CTC")
+        parsed_expected_ctc = _parse_optional_float(expected_ctc, "EXPECTED_CTC")
+        parsed_notice_days = _parse_optional_float(notice_days, "NOTICE_DAYS")
+        parsed_total_experience = _parse_optional_float(
+            total_experience,
+            "TOTAL_EXPERIENCE",
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
 
     if not resume_path:
         for ext in (".pdf", ".docx", ".doc", ".txt"):
@@ -131,6 +159,10 @@ async def start_search(
         work_modes=wm_list,
         portals=portal_list,
         max_applications=max_applications,
+        current_ctc=parsed_current_ctc,
+        expected_ctc=parsed_expected_ctc,
+        notice_days=parsed_notice_days,
+        total_experience=parsed_total_experience,
     )
 
     _active_task = asyncio.create_task(
@@ -190,6 +222,10 @@ async def _run_search(
             resume_data=resume_data,
             resume_path=resume_path,
             job_description=request.job_description,
+            current_ctc=request.current_ctc,
+            expected_ctc=request.expected_ctc,
+            notice_days=request.notice_days,
+            total_experience=request.total_experience,
             on_status=lambda msg, s=session: s.logs.append(msg),
         )
 

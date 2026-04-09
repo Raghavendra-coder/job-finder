@@ -95,6 +95,19 @@
     .checkbox-group input[type="checkbox"] { accent-color: var(--primary); width: 16px; height: 16px; }
 
     .field-group { margin-bottom: 16px; }
+    .field-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+    }
+    @media (max-width: 600px) {
+      .field-grid { grid-template-columns: 1fr; }
+    }
+    .field-help {
+      margin-top: 6px;
+      font-size: .78rem;
+      color: var(--text-muted);
+    }
 
     .btn {
       display: inline-flex; align-items: center; justify-content: center; gap: 8px;
@@ -269,6 +282,29 @@
             <input type="number" id="max-apps" value="25" min="1" max="200" />
           </div>
 
+          <div class="field-group">
+            <label>Application Profile</label>
+            <div class="field-grid">
+              <div>
+                <label for="current-ctc">CURRENT_CTC</label>
+                <input type="number" id="current-ctc" min="0" step="0.01" placeholder="e.g. 2800000" />
+              </div>
+              <div>
+                <label for="expected-ctc">EXPECTED_CTC</label>
+                <input type="number" id="expected-ctc" min="0" step="0.01" placeholder="e.g. 3000000" />
+              </div>
+              <div>
+                <label for="notice-days">NOTICE_DAYS</label>
+                <input type="number" id="notice-days" min="0" step="1" placeholder="e.g. 30" />
+              </div>
+              <div>
+                <label for="total-experience">TOTAL_EXPERIENCE</label>
+                <input type="number" id="total-experience" min="0" step="0.1" placeholder="e.g. 5" />
+              </div>
+            </div>
+            <div class="field-help">These values are used only for this user and this run.</div>
+          </div>
+
           <div class="btn-group">
             <button class="btn btn-primary" id="btn-start" onclick="startSearch()">
               Start Job Search
@@ -379,6 +415,10 @@
       const portals = [...document.querySelectorAll('input[name="portal"]:checked')]
         .map(el => el.value).join(',');
       const maxApps = document.getElementById('max-apps').value;
+      const currentCtc = document.getElementById('current-ctc').value.trim();
+      const expectedCtc = document.getElementById('expected-ctc').value.trim();
+      const noticeDays = document.getElementById('notice-days').value.trim();
+      const totalExperience = document.getElementById('total-experience').value.trim();
 
       if (!workModes) { alert('Select at least one work mode.'); return; }
       if (!portals) { alert('Select at least one portal.'); return; }
@@ -395,6 +435,10 @@
       form.append('portals', portals);
       form.append('max_applications', maxApps);
       if (resumePath) form.append('resume_path', resumePath);
+      if (currentCtc) form.append('current_ctc', currentCtc);
+      if (expectedCtc) form.append('expected_ctc', expectedCtc);
+      if (noticeDays) form.append('notice_days', noticeDays);
+      if (totalExperience) form.append('total_experience', totalExperience);
 
       try {
         const res = await fetch(`${API}/start-search`, { method: 'POST', body: form });
