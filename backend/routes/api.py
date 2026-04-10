@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import re
 import uuid
 from pathlib import Path
@@ -36,6 +37,9 @@ router = APIRouter(prefix="/api")
 
 _sessions: dict[str, SearchSession] = {}
 _active_task: asyncio.Task | None = None
+INFINITE_SEARCH_PAGES_PER_CYCLE = 10
+INFINITE_SEARCH_SLEEP_SECONDS = 30
+MAX_SEARCH_PAGES_PER_RUN = 800
 
 CRAWLER_MAP = {
     JobPortal.LINKEDIN: LinkedInCrawler,
@@ -134,6 +138,62 @@ def validate_inputs(data: dict[str, Any]) -> list[str]:
     return errors
 
 
+def _pages_per_search_run(request: JobSearchRequest) -> int:
+    if request.infinite_search:
+        return INFINITE_SEARCH_PAGES_PER_CYCLE
+    estimated_pages = math.ceil(max(request.max_applications, 25) / 25)
+    return max(3, min(estimated_pages, MAX_SEARCH_PAGES_PER_RUN))
+
+
+def _record_application_result(session: SearchSession, app_log: ApplicationLog) -> None:
+    session.applications.append(app_log)
+    if app_log.status == "applied":
+        session.jobs_applied += 1
+    elif app_log.status in ("failed", "error"):
+        session.errors += 1
+    else:
+        session.jobs_skipped += 1
+
+
+async def _crawl_jobs_batch(
+    session: SearchSession,
+    request: JobSearchRequest,
+    search_query: str,
+    seen_job_urls: set[str],
+) -> list[JobListing]:
+    new_jobs: list[JobListing] = []
+    pages_to_scan = _pages_per_search_run(request)
+
+    for portal in request.portals:
+        crawler_cls = CRAWLER_MAP.get(portal)
+        if not crawler_cls:
+            session.logs.append(f"Unsupported portal: {portal.value}")
+            continue
+
+        def _on_status(msg: str, s=session):
+            s.logs.append(msg)
+
+        crawler = crawler_cls(
+            search_query=search_query,
+            work_modes=request.work_modes,
+            max_pages=pages_to_scan,
+            on_status=_on_status,
+        )
+        jobs = await crawler.run()
+
+        unique_jobs = [job for job in jobs if job.url and job.url not in seen_job_urls]
+        for job in unique_jobs:
+            seen_job_urls.add(job.url)
+
+        new_jobs.extend(unique_jobs)
+        session.jobs_found += len(unique_jobs)
+        session.logs.append(
+            f"{portal.value}: {len(unique_jobs)} new unique job(s) this cycle"
+        )
+
+    return new_jobs
+
+
 @router.post("/upload-resume")
 async def upload_resume(file: UploadFile = File(...)):
     if not file.filename:
@@ -170,6 +230,7 @@ async def start_search(
     work_modes: str = Form("remote"),
     portals: str = Form("linkedin"),
     max_applications: int = Form(25),
+    infinite_search: str = Form("false"),
     resume_path: str = Form(""),
     phone_number: str = Form(""),
     country_code: str = Form(""),
@@ -190,6 +251,14 @@ async def start_search(
     session_id = str(uuid.uuid4())[:8]
     session = _get_session(session_id)
     session.status = "starting"
+    session.infinite_search = False
+    session.search_cycles = 0
+    session.jobs_found = 0
+    session.jobs_applied = 0
+    session.jobs_skipped = 0
+    session.errors = 0
+    session.logs = []
+    session.applications = []
 
     normalized_phone_number = re.sub(r"\D", "", phone_number).strip()
     normalized_country_code = country_code.strip()
@@ -227,6 +296,10 @@ async def start_search(
             is_immediate_joiner,
             "IS_IMMEDIATE_JOINER",
         )
+        parsed_infinite_search = _parse_bool(
+            infinite_search,
+            "INFINITE_SEARCH",
+        )
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
@@ -248,6 +321,7 @@ async def start_search(
         work_modes=wm_list,
         portals=portal_list,
         max_applications=max_applications,
+        infinite_search=parsed_infinite_search,
         phone_number=normalized_phone_number,
         country_code=normalized_country_code,
         current_ctc=parsed_current_ctc,
@@ -269,46 +343,24 @@ async def _run_search(
     request: JobSearchRequest,
     resume_path: Path,
 ) -> None:
+    global _active_task
     session.status = "running"
+    session.infinite_search = request.infinite_search
 
     try:
         resume_data = parse_resume(resume_path)
         session.logs.append("Resume parsed")
 
-        all_jobs: list[JobListing] = []
         search_query = _build_search_query(request.job_description)
         session.logs.append(f"Search query: {search_query}")
-
-        for portal in request.portals:
-            crawler_cls = CRAWLER_MAP.get(portal)
-            if not crawler_cls:
-                session.logs.append(f"Unsupported portal: {portal.value}")
-                continue
-
-            def _on_status(msg: str, s=session):
-                s.logs.append(msg)
-
-            crawler = crawler_cls(
-                search_query=search_query,
-                work_modes=request.work_modes,
-                on_status=_on_status,
-            )
-            jobs = await crawler.run()
-            all_jobs.extend(jobs)
-            session.jobs_found += len(jobs)
-
-        session.logs.append(f"Total jobs found: {len(all_jobs)}")
-
-        matched = filter_and_score_jobs(
-            resume_data,
-            all_jobs,
-            MATCH_THRESHOLD,
-            search_context=request.job_description,
+        session.logs.append(
+            "Infinite search is enabled"
+            if request.infinite_search
+            else f"Max applications requested: {request.max_applications}"
         )
-        session.logs.append(f"Jobs matching threshold: {len(matched)}")
-
-        apply_limit = min(request.max_applications, len(matched))
-        to_apply = matched[:apply_limit]
+        session.logs.append(
+            f"Pages per search cycle: {_pages_per_search_run(request)}"
+        )
 
         bot = AutoApplyBot(
             resume_data=resume_data,
@@ -323,22 +375,50 @@ async def _run_search(
             is_immediate_joiner=request.is_immediate_joiner,
             on_status=lambda msg, s=session: s.logs.append(msg),
         )
+        seen_job_urls: set[str] = set()
+        cycle = 0
 
-        for job in to_apply:
-            app_log = await bot.apply_to_job(job)
-            session.applications.append(app_log)
-            if app_log.status == "applied":
-                session.jobs_applied += 1
-            elif app_log.status in ("failed", "error"):
-                session.errors += 1
-            else:
-                session.jobs_skipped += 1
+        while True:
+            cycle += 1
+            session.search_cycles = cycle
+            session.logs.append(f"Search cycle {cycle} started")
 
-        session.status = "completed"
-        session.logs.append(
-            f"Done — Applied: {session.jobs_applied}, "
-            f"Errors: {session.errors}, Skipped: {session.jobs_skipped}"
-        )
+            new_jobs = await _crawl_jobs_batch(session, request, search_query, seen_job_urls)
+            session.logs.append(f"New jobs found this cycle: {len(new_jobs)}")
+
+            matched = filter_and_score_jobs(
+                resume_data,
+                new_jobs,
+                MATCH_THRESHOLD,
+                search_context=request.job_description,
+            )
+            session.logs.append(f"Jobs matching threshold this cycle: {len(matched)}")
+
+            remaining_slots = max(request.max_applications - len(session.applications), 0)
+            to_apply = matched if request.infinite_search else matched[:remaining_slots]
+
+            for job in to_apply:
+                if not request.infinite_search and len(session.applications) >= request.max_applications:
+                    break
+                app_log = await bot.apply_to_job(job)
+                _record_application_result(session, app_log)
+
+            if not request.infinite_search:
+                session.status = "completed"
+                session.logs.append(
+                    f"Done — Applied: {session.jobs_applied}, "
+                    f"Errors: {session.errors}, Skipped: {session.jobs_skipped}"
+                )
+                break
+
+            session.logs.append(
+                f"Cycle {cycle} complete — waiting {INFINITE_SEARCH_SLEEP_SECONDS}s before next search"
+            )
+            await asyncio.sleep(INFINITE_SEARCH_SLEEP_SECONDS)
+
+    except asyncio.CancelledError:
+        session.status = "stopped"
+        session.logs.append("Search stopped by user")
 
     except Exception as exc:
         session.status = "error"
@@ -350,6 +430,9 @@ async def _run_search(
             await close_browser()
         except Exception:
             pass
+        current_task = asyncio.current_task()
+        if _active_task is current_task:
+            _active_task = None
 
 
 @router.get("/status/{session_id}")

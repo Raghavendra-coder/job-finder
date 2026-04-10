@@ -132,6 +132,7 @@ class AutoApplyBot:
         is_split_layout = await self._is_split_linkedin_layout(page)
         job_container = await self._get_linkedin_job_container(page, target_url)
         if is_split_layout and job_container is not page:
+            job_container = await self._fresh_linkedin_detail_panel(page) or job_container
             await self._prime_linkedin_detail_panel(page, job_container)
 
         apply_btn = await self._find_linkedin_easy_apply_button(
@@ -186,7 +187,7 @@ class AutoApplyBot:
                 return False
 
             await self._emit(f"  Step {step + 1} of application form")
-            await self._fill_visible_fields(modal, app_log)
+            await self._fill_visible_fields(modal, app_log, page=page)
             await self._handle_radio_fields(modal, app_log)
             await self._handle_checkbox_fields(modal)
             await self._handle_resume_upload(modal)
@@ -398,7 +399,7 @@ class AutoApplyBot:
         max_steps = 10
         for step in range(max_steps):
             await self._emit(f"  Step {step + 1} of application form")
-            await self._fill_visible_fields(page, app_log)
+            await self._fill_visible_fields(page, app_log, page=page)
             await self._handle_resume_upload(page)
             await human_delay(1, 2)
 
@@ -448,7 +449,7 @@ class AutoApplyBot:
         await apply_btn.click()
         await human_delay(2, 3)
 
-        await self._fill_visible_fields(page, app_log)
+        await self._fill_visible_fields(page, app_log, page=page)
         await self._handle_resume_upload(page)
         await human_delay(1, 2)
 
@@ -468,7 +469,12 @@ class AutoApplyBot:
 
     # ── Shared form-filling helpers ─────────────────────────────────────
 
-    async def _fill_visible_fields(self, container, app_log: ApplicationLog) -> None:
+    async def _fill_visible_fields(
+        self,
+        container,
+        app_log: ApplicationLog,
+        page: Optional[Page] = None,
+    ) -> None:
         name = self.resume_data.name or APPLICANT_NAME
         email = self.resume_data.email or APPLICANT_EMAIL
         phone = self.phone_number or self.resume_data.phone or APPLICANT_PHONE
@@ -596,9 +602,14 @@ class AutoApplyBot:
 
             app_log.answers[field_label] = value
 
-        await self._handle_select_fields(container, app_log)
+        await self._handle_select_fields(container, app_log, page=page)
 
-    async def _handle_select_fields(self, container, app_log: ApplicationLog) -> None:
+    async def _handle_select_fields(
+        self,
+        container,
+        app_log: ApplicationLog,
+        page: Optional[Page] = None,
+    ) -> None:
         selects = container.locator("select")
         count = await selects.count()
         for idx in range(count):
@@ -608,15 +619,7 @@ class AutoApplyBot:
 
             label = await self._get_label(container, sel)
             label = await self._get_field_context(container, sel, label) or label
-            options = sel.locator("option")
-            option_count = await options.count()
-            option_texts = []
-            for opt_idx in range(option_count):
-                opt = options.nth(opt_idx)
-                val = await opt.get_attribute("value") or ""
-                text = (await opt.inner_text()).strip()
-                if val and text:
-                    option_texts.append((val, text))
+            option_texts = await self._native_select_options(sel)
 
             if not option_texts or not label:
                 continue
@@ -627,10 +630,89 @@ class AutoApplyBot:
 
             try:
                 await sel.select_option(value=best_val)
-                app_log.answers[label] = answer
                 await human_delay(0.3, 0.7)
             except Exception:
                 continue
+
+            if not await self._native_select_matches(sel, best_val, answer):
+                try:
+                    await sel.select_option(label=answer)
+                    await human_delay(0.2, 0.4)
+                except Exception:
+                    pass
+            if not await self._native_select_matches(sel, best_val, answer):
+                continue
+
+            app_log.answers[label] = answer
+
+        if page is not None:
+            await self._handle_combobox_fields(container, page, app_log)
+
+    async def _handle_combobox_fields(
+        self,
+        container,
+        page: Page,
+        app_log: ApplicationLog,
+    ) -> None:
+        combos = container.locator(
+            "[role='combobox'][aria-expanded], [role='combobox'][aria-controls], "
+            "button[aria-haspopup='listbox'], div[aria-haspopup='listbox']"
+        )
+        count = await combos.count()
+        for idx in range(count):
+            combo = combos.nth(idx)
+            if not await self._is_visible(combo, timeout=250):
+                continue
+            if await self._element_tag_name(combo) == "select":
+                continue
+
+            label = await self._get_label(container, combo)
+            label = await self._get_field_context(container, combo, label) or label
+            if not label:
+                continue
+
+            option_records = await self._open_combobox_and_collect_options(combo, page)
+            if not option_records:
+                continue
+
+            option_texts = [(str(opt_idx), text) for opt_idx, (_, text) in enumerate(option_records)]
+            selected_idx, answer = await self._resolve_option_choice(label, option_texts)
+            if not answer:
+                await self._dismiss_combobox(page)
+                continue
+
+            try:
+                option_locator = option_records[int(selected_idx)][0]
+            except Exception:
+                await self._dismiss_combobox(page)
+                continue
+
+            try:
+                await option_locator.click(timeout=2500)
+                await human_delay(0.2, 0.5)
+            except Exception:
+                await self._dismiss_combobox(page)
+                continue
+
+            if not await self._combobox_value_matches(combo, answer):
+                await self._dismiss_combobox(page)
+                option_records = await self._open_combobox_and_collect_options(combo, page)
+                retry_locator = self._find_option_locator_by_text(option_records, answer)
+                if retry_locator is None:
+                    await self._dismiss_combobox(page)
+                    continue
+                try:
+                    await retry_locator.click(timeout=2500)
+                    await human_delay(0.2, 0.5)
+                except Exception:
+                    await self._dismiss_combobox(page)
+                    continue
+
+            if not await self._combobox_value_matches(combo, answer):
+                await self._dismiss_combobox(page)
+                continue
+
+            app_log.answers[label] = answer
 
     async def _handle_radio_fields(self, container, app_log: ApplicationLog) -> None:
         fieldsets = container.locator("fieldset")
@@ -746,6 +828,155 @@ class AutoApplyBot:
         except Exception:
             pass
 
+    async def _native_select_options(self, select) -> list[tuple[str, str]]:
+        options = select.locator("option")
+        option_count = await options.count()
+        option_texts: list[tuple[str, str]] = []
+        for opt_idx in range(option_count):
+            opt = options.nth(opt_idx)
+            val = await opt.get_attribute("value") or ""
+            disabled = await opt.get_attribute("disabled")
+            text = (await opt.inner_text()).strip()
+            if disabled is not None or not text or self._is_placeholder_option(text):
+                continue
+            option_texts.append((val or text, text))
+        return option_texts
+
+    async def _native_select_matches(self, select, expected_value: str, expected_text: str) -> bool:
+        try:
+            selected = await select.evaluate(
+                """(el) => ({
+                    value: el.value || '',
+                    text: el.options[el.selectedIndex]?.text || ''
+                })"""
+            )
+        except Exception:
+            return False
+
+        selected_value = self._normalize_text((selected or {}).get("value", ""))
+        selected_text = self._normalize_text((selected or {}).get("text", ""))
+        return (
+            selected_value == self._normalize_text(expected_value)
+            or selected_text == self._normalize_text(expected_text)
+        )
+
+    @staticmethod
+    def _css_attr_selector(attr: str, value: str) -> str:
+        escaped = (value or "").replace("\\", "\\\\").replace('"', '\\"')
+        return f'[{attr}="{escaped}"]'
+
+    async def _open_combobox_and_collect_options(
+        self,
+        combo,
+        page: Page,
+    ) -> list[tuple[Locator, str]]:
+        try:
+            await combo.scroll_into_view_if_needed()
+        except Exception:
+            pass
+        try:
+            await combo.click(timeout=2500)
+        except Exception:
+            return []
+
+        controls_id = (
+            await self._locator_attribute(combo, "aria-controls")
+            or await self._locator_attribute(combo, "aria-owns")
+        )
+        option_selectors: list[str] = []
+        if controls_id:
+            controlled_selector = self._css_attr_selector("id", controls_id)
+            option_selectors.append(
+                ", ".join(
+                    (
+                        f"{controlled_selector} [role='option']",
+                        f"{controlled_selector}[role='option']",
+                        f"{controlled_selector} option",
+                        f"{controlled_selector} li",
+                    )
+                )
+            )
+
+        option_selectors.append(
+            ", ".join(
+                (
+                    "[role='listbox'] [role='option']",
+                    "[role='listbox'] li",
+                    "[role='option']",
+                    "li[role='option']",
+                )
+            )
+        )
+        option_locator = page.locator(", ".join(option_selectors))
+        for _ in range(6):
+            option_count = await option_locator.count()
+            option_records: list[tuple[Locator, str]] = []
+            for opt_idx in range(min(option_count, 40)):
+                option = option_locator.nth(opt_idx)
+                if not await self._is_visible(option, timeout=120):
+                    continue
+                try:
+                    text = " ".join((await option.inner_text()).strip().split())
+                except Exception:
+                    text = ""
+                if not text or self._is_placeholder_option(text):
+                    continue
+                option_records.append((option, text))
+            if option_records:
+                return option_records
+            await human_delay(0.1, 0.2)
+
+        await self._dismiss_combobox(page)
+        return []
+
+    async def _dismiss_combobox(self, page: Page) -> None:
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
+
+    async def _combobox_value_matches(self, combo, expected_text: str) -> bool:
+        normalized_expected = self._normalize_text(expected_text)
+        if not normalized_expected:
+            return False
+
+        value_candidates: list[str] = []
+        for attr in ("value", "aria-label", "innerText", "textContent"):
+            try:
+                if attr in {"innerText", "textContent"}:
+                    raw = await combo.evaluate(f"(el) => el.{attr} || ''")
+                else:
+                    raw = await combo.get_attribute(attr) or ""
+            except Exception:
+                raw = ""
+            normalized = self._normalize_text(raw)
+            if normalized:
+                value_candidates.append(normalized)
+
+        return any(
+            normalized_expected == candidate or normalized_expected in candidate
+            for candidate in value_candidates
+        )
+
+    def _find_option_locator_by_text(
+        self,
+        option_records: list[tuple[Locator, str]],
+        expected_text: str,
+    ) -> Optional[Locator]:
+        normalized_expected = self._normalize_text(expected_text)
+        for option, text in option_records:
+            normalized = self._normalize_text(text)
+            if normalized == normalized_expected or normalized_expected in normalized:
+                return option
+        return None
+
+    @staticmethod
+    async def _element_tag_name(locator) -> str:
+        try:
+            return (await locator.evaluate("(el) => el.tagName || ''")).strip().lower()
+        except Exception:
+            return ""
+
     @staticmethod
     async def _get_label(container, element) -> str:
         el_id = await element.get_attribute("id") or ""
@@ -782,27 +1013,66 @@ class AutoApplyBot:
         label: str,
         option_texts: list[tuple[str, str]],
     ) -> tuple[str, str]:
+        selected = await self._resolve_option_choice(label, option_texts)
+        logger.info("Field: %s | Type: select | Value: %s", label, selected[1])
+        return selected
+
+    async def _resolve_option_choice(
+        self,
+        label: str,
+        option_texts: list[tuple[str, str]],
+    ) -> tuple[str, str]:
         rule_based = self._rule_based_option_choice(label, option_texts)
         if rule_based is not None:
-            logger.info("Field: %s | Type: select | Value: %s", label, rule_based[1])
             return rule_based
 
+        answer = await self._generate_option_answer(label, option_texts)
+        matched = self._match_option(answer, option_texts)
+        if matched is not None:
+            return matched
+
+        return option_texts[0]
+
+    async def _generate_option_answer(
+        self,
+        label: str,
+        option_texts: list[tuple[str, str]],
+    ) -> str:
         choices = ", ".join(text for _, text in option_texts)
-        question = f"{label} (choose one: {choices})"
-        answer = await generate_answer(question, self.resume_data, self.job_description)
+        question = (
+            f"{label}\n"
+            f"Options: {choices}\n"
+            "Respond with exactly one option from the list above. "
+            "Do not add any explanation or extra words."
+        )
+        return await generate_answer(question, self.resume_data, self.job_description)
 
-        best_val, best_text = option_texts[-1]
-        answer_lower = answer.lower().strip()
-        if answer_lower:
-            for val, text in option_texts:
-                text_lower = text.lower()
-                if text_lower in answer_lower or answer_lower in text_lower:
-                    best_val, best_text = val, text
-                    break
+    @classmethod
+    def _match_option(
+        cls,
+        answer: str,
+        option_texts: list[tuple[str, str]],
+    ) -> Optional[tuple[str, str]]:
+        answer_norm = cls._normalize_text(answer)
+        if not answer_norm:
+            return None
 
-        selected_answer = answer or best_text
-        logger.info("Field: %s | Type: select | Value: %s", label, selected_answer)
-        return best_val, selected_answer
+        for value, text in option_texts:
+            if cls._normalize_text(text) == answer_norm:
+                return value, text
+
+        for value, text in option_texts:
+            option_norm = cls._normalize_text(text)
+            if option_norm and (option_norm in answer_norm or answer_norm in option_norm):
+                return value, text
+
+        if cls._is_yes_no_options(option_texts):
+            if answer_norm.startswith(("yes", "y", "true")):
+                return cls._yes_like_option(option_texts)
+            if answer_norm.startswith(("no", "n", "false")):
+                return cls._no_like_option(option_texts)
+
+        return None
 
     async def _resolve_radio_answer(
         self,
@@ -810,28 +1080,9 @@ class AutoApplyBot:
         options: list[tuple[Locator, str]],
     ) -> tuple[Optional[Locator], str]:
         option_texts = [(str(idx), text) for idx, (_, text) in enumerate(options)]
-        rule_based = self._rule_based_option_choice(label, option_texts)
-        if rule_based is not None:
-            selected_idx = int(rule_based[0])
-            logger.info("Field: %s | Type: radio | Value: %s", label, rule_based[1])
-            return options[selected_idx][0], rule_based[1]
-
-        choices = ", ".join(text for _, text in options)
-        question = f"{label} (choose one: {choices})"
-        answer = await generate_answer(question, self.resume_data, self.job_description)
-
-        answer_lower = answer.lower().strip()
-        if answer_lower:
-            for radio, text in options:
-                text_lower = text.lower()
-                if text_lower in answer_lower or answer_lower in text_lower:
-                    selected_answer = answer or text
-                    logger.info("Field: %s | Type: radio | Value: %s", label, selected_answer)
-                    return radio, selected_answer
-
-        selected_answer = answer or options[-1][1]
+        selected_idx, selected_answer = await self._resolve_option_choice(label, option_texts)
         logger.info("Field: %s | Type: radio | Value: %s", label, selected_answer)
-        return options[-1][0], selected_answer
+        return options[int(selected_idx)][0], selected_answer
 
     async def _get_field_validation_text(self, field) -> str:
         for ancestor_xpath in (
@@ -963,6 +1214,11 @@ class AutoApplyBot:
         if self._is_immediate_joiner_label(label_lower):
             return self._boolean_option_choice(option_texts, self.is_immediate_joiner)
 
+        if self._is_yes_no_options(option_texts):
+            experience_choice = self._experience_yes_no_choice(label_lower, option_texts)
+            if experience_choice is not None:
+                return experience_choice
+
         if "language" in label_lower:
             for value, text in option_texts:
                 if "english" in text.lower():
@@ -1011,6 +1267,111 @@ class AutoApplyBot:
         if desired:
             return self._yes_like_option(option_texts)
         return self._no_like_option(option_texts)
+
+    def _experience_yes_no_choice(
+        self,
+        label_lower: str,
+        option_texts: list[tuple[str, str]],
+    ) -> Optional[tuple[str, str]]:
+        if not any(
+            token in label_lower
+            for token in (
+                "experience",
+                "worked with",
+                "work with",
+                "hands-on",
+                "hands on",
+                "knowledge of",
+                "familiar with",
+                "proficient",
+                "expertise",
+                "using",
+                "designing",
+                "building",
+                "deploying",
+                "integrated",
+                "developing",
+                "apis",
+                "api",
+            )
+        ):
+            return None
+
+        resume_match = self._resume_supports_question(label_lower)
+        if resume_match is True:
+            return self._yes_like_option(option_texts)
+        if resume_match is False:
+            return self._no_like_option(option_texts)
+        return None
+
+    @classmethod
+    def _is_yes_no_options(cls, option_texts: list[tuple[str, str]]) -> bool:
+        normalized = {
+            cls._normalize_text(text)
+            for _, text in option_texts
+            if cls._normalize_text(text) and not cls._is_placeholder_option(text)
+        }
+        return normalized == {"yes", "no"}
+
+    def _resume_supports_question(self, label_lower: str) -> Optional[bool]:
+        resume_text = self._resume_search_text()
+        if not resume_text:
+            return None
+
+        for skill in self.resume_data.skills:
+            skill_norm = self._normalize_text(skill)
+            if skill_norm and skill_norm in label_lower:
+                return True
+
+        keywords = self._question_keywords(label_lower)
+        if not keywords:
+            return None
+
+        matches = [keyword for keyword in keywords if keyword in resume_text]
+        if matches:
+            return True
+
+        technical_keywords = [keyword for keyword in keywords if keyword not in {"experience", "worked", "work", "using"}]
+        if technical_keywords:
+            return False
+        return None
+
+    def _resume_search_text(self) -> str:
+        parts = [
+            self.resume_data.summary,
+            self.resume_data.raw_text,
+            " ".join(self.resume_data.skills),
+        ]
+        for exp in self.resume_data.experience:
+            parts.extend([exp.title, exp.company, exp.description])
+        return self._normalize_text(" ".join(part for part in parts if part))
+
+    @classmethod
+    def _question_keywords(cls, text: str) -> list[str]:
+        tokens = [
+            token
+            for token in re.findall(r"[a-zA-Z][a-zA-Z0-9+#./-]{1,}", text.lower())
+            if token not in {
+                "do", "you", "have", "with", "for", "the", "and", "or", "in", "of",
+                "to", "using", "use", "worked", "work", "experience", "designing",
+                "building", "deploying", "operating", "professional", "services",
+                "years", "year", "would", "your", "this", "that", "from",
+            }
+        ]
+        seen: list[str] = []
+        for token in tokens:
+            if token not in seen:
+                seen.append(token)
+        return seen
+
+    @staticmethod
+    def _normalize_text(text: str) -> str:
+        return re.sub(r"\s+", " ", (text or "").strip()).lower()
+
+    @staticmethod
+    def _is_placeholder_option(text: str) -> bool:
+        normalized = re.sub(r"\s+", " ", (text or "").strip()).lower()
+        return normalized in {"select", "select an option", "choose", "choose one", "please select"}
 
     @staticmethod
     def _match_numeric_option(
@@ -1206,9 +1567,8 @@ class AutoApplyBot:
         if not await self._is_split_linkedin_layout(page):
             return page
 
-        detail_panel = page.locator(
-            ".jobs-search__job-details, .jobs-details, .jobs-details__main-content"
-        ).first
+        detail_panel = await self._fresh_linkedin_detail_panel(page)
+        clicked_card = False
         target_id = self._extract_linkedin_job_id(target_url)
         if target_id:
             cards = page.locator(
@@ -1220,23 +1580,43 @@ class AutoApplyBot:
                 card_id = await card.get_attribute("data-job-id") or ""
                 if target_id == card_id:
                     await self._click_linkedin_card(page, card, expected_job_id=target_id)
+                    clicked_card = True
                     break
 
                 link = card.locator("a[href*='/jobs/view/'], a[href*='currentJobId=']").first
                 href = await self._locator_attribute(link, "href")
                 if target_id and target_id in href:
                     await self._click_linkedin_card(page, card, expected_job_id=target_id)
+                    clicked_card = True
                     break
 
-        if not await self._is_visible(detail_panel, timeout=2000):
+        if clicked_card or detail_panel is None:
+            detail_panel = await self._fresh_linkedin_detail_panel(page)
+
+        if detail_panel is None:
             cards = page.locator(".jobs-search-results__list-item, .job-card-container, [data-job-id]")
             if await cards.count() > 0:
                 fallback_id = await self._locator_attribute(cards.first, "data-job-id")
                 await self._click_linkedin_card(page, cards.first, expected_job_id=fallback_id)
+                detail_panel = await self._fresh_linkedin_detail_panel(page)
 
+        if detail_panel is not None:
+            return detail_panel
+
+        detail_panel = page.locator(
+            ".jobs-search__job-details, .jobs-details, .jobs-details__main-content"
+        ).first
         if await self._is_visible(detail_panel, timeout=2000):
             return detail_panel
         return page
+
+    async def _fresh_linkedin_detail_panel(self, page: Page) -> Optional[Locator]:
+        detail_panel = page.locator(
+            ".jobs-search__job-details, .jobs-details, .jobs-details__main-content"
+        ).first
+        if await self._is_visible(detail_panel, timeout=2000):
+            return detail_panel
+        return None
 
     async def _prime_linkedin_detail_panel(self, page: Page, panel) -> None:
         try:

@@ -64,8 +64,7 @@ class LinkedInCrawler(BaseCrawler):
                 try:
                     detail_panel = None
                     if is_split_layout:
-                        await self._activate_split_layout_card(card)
-                        detail_panel = await self._get_detail_panel()
+                        detail_panel = await self._activate_split_layout_card(card)
                         if detail_panel is None:
                             continue
 
@@ -208,7 +207,7 @@ class LinkedInCrawler(BaseCrawler):
             ".jobs-search-results-list, .jobs-search-results__list"
         ).count() > 0
 
-    async def _activate_split_layout_card(self, card) -> None:
+    async def _activate_split_layout_card(self, card):
         assert self._page is not None
         previous_title = await self._current_detail_title()
         expected_job_id = await self._locator_attribute(card, "data-job-id")
@@ -230,9 +229,10 @@ class LinkedInCrawler(BaseCrawler):
             try:
                 await card.click(timeout=2500)
             except Exception:
-                return
+                return None
 
         await self._wait_for_detail_panel_change(previous_title, expected_job_id)
+        return await self._get_detail_panel()
 
     async def _wait_for_detail_panel(self) -> None:
         assert self._page is not None

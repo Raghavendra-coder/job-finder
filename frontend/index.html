@@ -290,10 +290,14 @@
             </div>
           </div>
 
-          <div class="field-group">
-            <label for="max-apps">Max Applications</label>
-            <input type="number" id="max-apps" value="25" min="1" max="200" />
-          </div>
+	          <div class="field-group">
+	            <label for="max-apps">Max Applications</label>
+	            <input type="number" id="max-apps" value="25" min="1" max="20000" />
+	            <div class="checkbox-group" style="margin-top: 10px;">
+	              <label><input type="checkbox" id="infinite-search" /> Infinite Search (run until you press Stop)</label>
+	            </div>
+	            <div class="field-help">When enabled, the bot keeps searching and applying in cycles until you stop it.</div>
+	          </div>
 
           <div class="field-group">
             <label>Application Profile</label>
@@ -413,16 +417,18 @@
       if (countryCodeInput.value !== countryCode) countryCodeInput.value = countryCode;
     }
 
-    function getValidationErrors() {
-      syncProfileFieldFormatting();
+	    function getValidationErrors() {
+	      syncProfileFieldFormatting();
+	      syncSearchModeControls();
 
-      const jd = document.getElementById('jd').value.trim();
-      const workModes = [...document.querySelectorAll('input[name="workmode"]:checked')].map(el => el.value);
-      const portals = [...document.querySelectorAll('input[name="portal"]:checked')].map(el => el.value);
-      const maxApps = Number(document.getElementById('max-apps').value);
-      const phone = document.getElementById('phone-number').value.trim();
-      const countryCode = document.getElementById('country-code').value.trim();
-      const currentCtc = Number(document.getElementById('current-ctc').value);
+	      const jd = document.getElementById('jd').value.trim();
+	      const workModes = [...document.querySelectorAll('input[name="workmode"]:checked')].map(el => el.value);
+	      const portals = [...document.querySelectorAll('input[name="portal"]:checked')].map(el => el.value);
+	      const maxApps = Number(document.getElementById('max-apps').value);
+	      const infiniteSearch = document.getElementById('infinite-search').checked;
+	      const phone = document.getElementById('phone-number').value.trim();
+	      const countryCode = document.getElementById('country-code').value.trim();
+	      const currentCtc = Number(document.getElementById('current-ctc').value);
       const expectedCtc = Number(document.getElementById('expected-ctc').value);
       const noticeDaysRaw = document.getElementById('notice-days').value.trim();
       const totalExperienceRaw = document.getElementById('total-experience').value.trim();
@@ -430,14 +436,15 @@
       const totalExperience = Number(totalExperienceRaw);
 
       const errors = [];
-      if (!resumePath) errors.push('Upload and parse a resume first');
-      if (jd.length < 10) errors.push('Job description is required');
-      if (!workModes.length) errors.push('Select at least one work mode');
-      if (!portals.length) errors.push('Select at least one portal');
-      if (!Number.isFinite(maxApps) || maxApps < 1) errors.push('Max applications must be at least 1');
-      if (!/^\d{10}$/.test(phone)) errors.push('Phone number must be exactly 10 digits');
-      if (!/^\+\d{1,4}$/.test(countryCode)) errors.push('Country code must be like +91');
-      if (!Number.isFinite(currentCtc) || currentCtc <= 0) errors.push('Current CTC must be greater than 0');
+	      if (!resumePath) errors.push('Upload and parse a resume first');
+	      if (jd.length < 10) errors.push('Job description is required');
+	      if (!workModes.length) errors.push('Select at least one work mode');
+	      if (!portals.length) errors.push('Select at least one portal');
+	      if (!Number.isFinite(maxApps) || maxApps < 1) errors.push('Max applications must be at least 1');
+	      if (!infiniteSearch && maxApps > 20000) errors.push('Max applications cannot exceed 20000');
+	      if (!/^\d{10}$/.test(phone)) errors.push('Phone number must be exactly 10 digits');
+	      if (!/^\+\d{1,4}$/.test(countryCode)) errors.push('Country code must be like +91');
+	      if (!Number.isFinite(currentCtc) || currentCtc <= 0) errors.push('Current CTC must be greater than 0');
       if (!Number.isFinite(expectedCtc) || expectedCtc <= 0) errors.push('Expected CTC must be greater than 0');
       if (noticeDaysRaw === '' || !Number.isFinite(noticeDays) || noticeDays < 0) {
         errors.push('Notice period must be greater than or equal to 0');
@@ -446,8 +453,20 @@
         errors.push('Experience must be greater than or equal to 0');
       }
 
-      return errors;
-    }
+	      return errors;
+	    }
+
+	    function syncSearchModeControls() {
+	      const infiniteSearch = document.getElementById('infinite-search').checked;
+	      const maxAppsInput = document.getElementById('max-apps');
+	      maxAppsInput.disabled = infiniteSearch;
+	      if (infiniteSearch) {
+	        maxAppsInput.dataset.previousValue = maxAppsInput.value || '25';
+	        maxAppsInput.value = maxAppsInput.value || '25';
+	      } else if (maxAppsInput.dataset.previousValue && !maxAppsInput.value) {
+	        maxAppsInput.value = maxAppsInput.dataset.previousValue;
+	      }
+	    }
 
     function updateFormValidation(showErrors = false) {
       const errors = getValidationErrors();
@@ -528,12 +547,13 @@
       const jd = document.getElementById('jd').value.trim();
       const workModes = [...document.querySelectorAll('input[name="workmode"]:checked')]
         .map(el => el.value).join(',');
-      const portals = [...document.querySelectorAll('input[name="portal"]:checked')]
-        .map(el => el.value).join(',');
-      const maxApps = document.getElementById('max-apps').value;
-      const phoneNumber = document.getElementById('phone-number').value.trim();
-      const countryCode = document.getElementById('country-code').value.trim();
-      const currentCtc = document.getElementById('current-ctc').value.trim();
+	      const portals = [...document.querySelectorAll('input[name="portal"]:checked')]
+	        .map(el => el.value).join(',');
+	      const maxApps = document.getElementById('max-apps').value;
+	      const infiniteSearch = document.getElementById('infinite-search').checked;
+	      const phoneNumber = document.getElementById('phone-number').value.trim();
+	      const countryCode = document.getElementById('country-code').value.trim();
+	      const currentCtc = document.getElementById('current-ctc').value.trim();
       const expectedCtc = document.getElementById('expected-ctc').value.trim();
       const noticeDays = document.getElementById('notice-days').value.trim();
       const totalExperience = document.getElementById('total-experience').value.trim();
@@ -546,13 +566,14 @@
       stopBtn.classList.remove('hidden');
 
       const form = new FormData();
-      form.append('job_description', jd);
-      form.append('work_modes', workModes);
-      form.append('portals', portals);
-      form.append('max_applications', maxApps);
-      if (resumePath) form.append('resume_path', resumePath);
-      form.append('phone_number', phoneNumber);
-      form.append('country_code', countryCode);
+	      form.append('job_description', jd);
+	      form.append('work_modes', workModes);
+	      form.append('portals', portals);
+	      form.append('max_applications', maxApps);
+	      form.append('infinite_search', String(infiniteSearch));
+	      if (resumePath) form.append('resume_path', resumePath);
+	      form.append('phone_number', phoneNumber);
+	      form.append('country_code', countryCode);
       if (currentCtc) form.append('current_ctc', currentCtc);
       if (expectedCtc) form.append('expected_ctc', expectedCtc);
       if (noticeDays) form.append('notice_days', noticeDays);
@@ -630,20 +651,21 @@
 
         renderApplications(data.applications || []);
 
-        if (data.status === 'completed' || data.status === 'error') {
-          setStatus(data.status);
-          stopPolling();
-        }
+	        if (data.status === 'completed' || data.status === 'error' || data.status === 'stopped') {
+	          setStatus(data.status);
+	          stopPolling();
+	        }
       } catch { /* ignore poll errors */ }
     }
 
     document.addEventListener('DOMContentLoaded', () => {
       const validationInputs = [
-        'jd',
-        'max-apps',
-        'phone-number',
-        'country-code',
-        'current-ctc',
+	        'jd',
+	        'max-apps',
+	        'infinite-search',
+	        'phone-number',
+	        'country-code',
+	        'current-ctc',
         'expected-ctc',
         'notice-days',
         'total-experience',
