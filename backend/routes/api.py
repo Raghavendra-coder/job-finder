@@ -346,6 +346,7 @@ async def _run_search(
     global _active_task
     session.status = "running"
     session.infinite_search = request.infinite_search
+    bot: AutoApplyBot | None = None
 
     try:
         resume_data = parse_resume(resume_path)
@@ -386,19 +387,27 @@ async def _run_search(
             new_jobs = await _crawl_jobs_batch(session, request, search_query, seen_job_urls)
             session.logs.append(f"New jobs found this cycle: {len(new_jobs)}")
 
-            matched = filter_and_score_jobs(
+            matched, skipped_by_score = filter_and_score_jobs(
                 resume_data,
                 new_jobs,
                 MATCH_THRESHOLD,
                 search_context=request.job_description,
             )
-            session.logs.append(f"Jobs matching threshold this cycle: {len(matched)}")
+            session.logs.append(
+                f"Jobs matching threshold this cycle: {len(matched)} "
+                f"(skipped {len(skipped_by_score)} below {MATCH_THRESHOLD:.0%})"
+            )
 
-            remaining_slots = max(request.max_applications - len(session.applications), 0)
+            for job in skipped_by_score:
+                skip_log = ApplicationLog(job=job, status="skipped")
+                skip_log.error = f"match_score_{job.match_score:.2f}_below_threshold"
+                _record_application_result(session, skip_log)
+
+            remaining_slots = max(request.max_applications - session.jobs_applied, 0)
             to_apply = matched if request.infinite_search else matched[:remaining_slots]
 
             for job in to_apply:
-                if not request.infinite_search and len(session.applications) >= request.max_applications:
+                if not request.infinite_search and session.jobs_applied >= request.max_applications:
                     break
                 app_log = await bot.apply_to_job(job)
                 _record_application_result(session, app_log)
@@ -426,6 +435,11 @@ async def _run_search(
         logger.exception("Search task failed")
 
     finally:
+        if bot is not None:
+            try:
+                await bot.close()
+            except Exception:
+                pass
         try:
             await close_browser()
         except Exception:
@@ -440,7 +454,7 @@ async def get_status(session_id: str):
     session = _sessions.get(session_id)
     if not session:
         return JSONResponse({"error": "Session not found"}, status_code=404)
-    return session.model_dump()
+    return session.model_dump(mode="json")
 
 
 @router.get("/status")
@@ -450,9 +464,9 @@ async def get_all_status():
 
     latest = max(_sessions.values(), key=lambda s: s.session_id)
     return {
-        "sessions": [s.model_dump() for s in _sessions.values()],
+        "sessions": [s.model_dump(mode="json") for s in _sessions.values()],
         "active": _active_task is not None and not _active_task.done(),
-        "latest": latest.model_dump(),
+        "latest": latest.model_dump(mode="json"),
     }
 
 

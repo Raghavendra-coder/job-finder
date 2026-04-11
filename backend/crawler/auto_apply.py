@@ -5,11 +5,12 @@ from datetime import date
 from pathlib import Path
 from typing import Callable, Optional
 
-from playwright.async_api import Frame, Locator, Page
+from playwright.async_api import BrowserContext, Frame, Locator, Page
 
 from backend.ai.answer_generator import generate_answer
 from backend.auth.session_manager import (
     create_context,
+    ensure_logged_in,
     human_delay,
     is_managed_context,
     save_cookies,
@@ -17,6 +18,26 @@ from backend.auth.session_manager import (
 from backend.config import APPLICANT_EMAIL, APPLICANT_NAME, APPLICANT_PHONE
 from backend.logger import log_event, logger
 from backend.models import ApplicationLog, JobListing, JobPortal, ResumeData, WorkMode
+
+
+_LI_SPLIT_LIST_SEL = (
+    ".jobs-search-results-list, .jobs-search-results__list, "
+    ".scaffold-layout__list, .scaffold-layout__list-detail, "
+    ".jobs-search-two-pane__wrapper"
+)
+
+_LI_DETAIL_PANEL_SEL = (
+    ".scaffold-layout__detail, "
+    ".jobs-search__job-details, .jobs-details, .jobs-details__main-content, "
+    ".jobs-search__job-details--wrapper, .jobs-details__main-content--single-pane"
+)
+
+_LI_TITLE_SEL = (
+    "h1, h2.job-details-jobs-unified-top-card__job-title, "
+    ".job-details-jobs-unified-top-card__job-title, "
+    ".jobs-unified-top-card__job-title, "
+    ".t-24.job-details-jobs-unified-top-card__job-title"
+)
 
 
 class AutoApplyBot:
@@ -47,10 +68,45 @@ class AutoApplyBot:
         self.total_experience = total_experience
         self.is_immediate_joiner = is_immediate_joiner
         self.on_status = on_status or (lambda _: None)
+        self._contexts: dict[JobPortal, BrowserContext] = {}
+        self._logged_in: set[JobPortal] = set()
 
     async def _emit(self, msg: str) -> None:
         self.on_status(msg)
         logger.info("[auto-apply] %s", msg)
+
+    async def _ensure_logged_in_context(self, portal: JobPortal) -> BrowserContext:
+        if portal in self._contexts:
+            return self._contexts[portal]
+
+        ctx = await create_context(portal)
+        self._contexts[portal] = ctx
+
+        login_page = await ctx.new_page()
+        try:
+            await self._emit(f"Verifying login for {portal.value}...")
+            logged_in = await ensure_logged_in(login_page, portal)
+            if not logged_in:
+                raise RuntimeError(f"Failed to log in to {portal.value}")
+            self._logged_in.add(portal)
+            if is_managed_context(ctx):
+                await save_cookies(ctx, portal)
+            await self._emit(f"Login verified for {portal.value}")
+        finally:
+            await login_page.close()
+
+        return ctx
+
+    async def close(self) -> None:
+        for portal, ctx in list(self._contexts.items()):
+            try:
+                if is_managed_context(ctx):
+                    await save_cookies(ctx, portal)
+                    await ctx.close()
+            except Exception:
+                pass
+        self._contexts.clear()
+        self._logged_in.clear()
 
     async def apply_to_job(self, job: JobListing) -> ApplicationLog:
         app_log = ApplicationLog(job=job)
@@ -68,7 +124,7 @@ class AutoApplyBot:
 
             await self._emit(f"Applying to {job.title} @ {job.company} ({job.portal.value})")
 
-            ctx = await create_context(job.portal)
+            ctx = await self._ensure_logged_in_context(job.portal)
             page = await ctx.new_page()
 
             try:
@@ -91,9 +147,6 @@ class AutoApplyBot:
                     )
             finally:
                 await page.close()
-                if is_managed_context(ctx):
-                    await save_cookies(ctx, job.portal)
-                    await ctx.close()
 
         except Exception as exc:
             app_log.status = "error"
@@ -116,57 +169,21 @@ class AutoApplyBot:
             app_log.error = "not_linkedin_easy_apply_url"
             return False
 
+        job_id = self._extract_linkedin_job_id(target_url)
         page.set_default_timeout(5000)
-        await page.goto(target_url, wait_until="domcontentloaded")
-        await self._wait_for_linkedin_transition(page)
 
-        if "linkedin.com/jobs/view" not in page.url.lower():
-            # LinkedIn can occasionally redirect into list-pane URLs. Retry canonical.
-            retry_url = self._canonical_linkedin_job_url(page.url) or target_url
-            await page.goto(retry_url, wait_until="domcontentloaded")
-            await self._wait_for_linkedin_transition(page)
-            if "linkedin.com/jobs/view" not in page.url.lower() and not await self._is_split_linkedin_layout(page):
-                app_log.error = "linkedin_redirected_from_job_page"
-                return False
-
-        is_split_layout = await self._is_split_linkedin_layout(page)
-        job_container = await self._get_linkedin_job_container(page, target_url)
-        if is_split_layout and job_container is not page:
-            job_container = await self._fresh_linkedin_detail_panel(page) or job_container
-            await self._prime_linkedin_detail_panel(page, job_container)
-
-        apply_btn = await self._find_linkedin_easy_apply_button(
-            page,
-            job_container,
-            allow_page_fallback=not is_split_layout,
+        clicked = await self._linkedin_navigate_and_click_apply(
+            page, target_url, job_id
         )
-        clicked = False
-        if apply_btn is not None:
-            clicked = await self._click_if_enabled(apply_btn)
-        if not clicked and job_container is not page:
-            clicked = await self._force_click_easy_apply_by_text(page, job_container)
-        if not clicked and is_split_layout and job_container is not page:
-            visible_buttons = await self._list_button_labels(job_container)
-            if visible_buttons:
-                await self._emit(
-                    "  Right panel buttons before fallback: "
-                    + ", ".join(visible_buttons[:8])
-                )
-            try:
-                await page.screenshot(path="/tmp/linkedin-split-debug.png", full_page=True)
-            except Exception:
-                pass
 
-        if not clicked:
-            apply_btn = await self._find_linkedin_easy_apply_button(
-                page,
-                page,
-                allow_page_fallback=True,
-            )
-            if apply_btn is not None:
-                clicked = await self._click_if_enabled(apply_btn)
-        if not clicked:
-            clicked = await self._force_click_easy_apply_by_text(page)
+        if not clicked and job_id:
+            await self._emit("  Split-layout attempt failed — trying standalone /jobs/view/ page")
+            standalone_url = f"https://www.linkedin.com/jobs/view/{job_id}/?locale=en_US"
+            await page.goto(standalone_url, wait_until="domcontentloaded")
+            await self._wait_for_linkedin_transition(page)
+            if "linkedin.com/jobs/view" in page.url.lower():
+                clicked = await self._linkedin_try_click_apply(page, page, is_split=False)
+
         if not clicked:
             await self._emit("No Easy Apply button found — external application")
             app_log.error = "external_application"
@@ -174,6 +191,9 @@ class AutoApplyBot:
 
         await self._wait_for_linkedin_transition(page)
         modal = await self._get_linkedin_modal(page)
+        if modal is None:
+            await human_delay(1, 2)
+            modal = await self._get_linkedin_modal(page)
         if modal is None:
             await self._emit("LinkedIn Easy Apply modal not found after click")
             app_log.error = "easy_apply_modal_not_found"
@@ -239,6 +259,71 @@ class AutoApplyBot:
         app_log.error = "form_navigation_stuck"
         return False
 
+    async def _linkedin_navigate_and_click_apply(
+        self, page: Page, target_url: str, job_id: str,
+    ) -> bool:
+        """Navigate to a LinkedIn job URL and attempt to click Easy Apply."""
+        await page.goto(target_url, wait_until="domcontentloaded")
+        await self._wait_for_linkedin_transition(page)
+
+        on_view_page = "linkedin.com/jobs/view" in page.url.lower()
+        is_split = await self._is_split_linkedin_layout(page)
+
+        if not on_view_page and not is_split:
+            retry_url = self._canonical_linkedin_job_url(page.url) or target_url
+            await page.goto(retry_url, wait_until="domcontentloaded")
+            await self._wait_for_linkedin_transition(page)
+            on_view_page = "linkedin.com/jobs/view" in page.url.lower()
+            is_split = await self._is_split_linkedin_layout(page)
+            if not on_view_page and not is_split:
+                return False
+
+        if is_split and job_id:
+            if f"currentJobId={job_id}" not in page.url:
+                await page.goto(
+                    f"https://www.linkedin.com/jobs/search/?currentJobId={job_id}&f_AL=true&locale=en_US",
+                    wait_until="domcontentloaded",
+                )
+                await self._wait_for_linkedin_transition(page)
+            try:
+                await page.wait_for_selector(_LI_DETAIL_PANEL_SEL, timeout=8000)
+            except Exception:
+                pass
+            await human_delay(1, 2)
+
+        job_container = await self._get_linkedin_job_container(page, target_url)
+        if is_split and job_container is not page:
+            await self._prime_linkedin_detail_panel(page, job_container)
+
+        return await self._linkedin_try_click_apply(page, job_container, is_split)
+
+    async def _linkedin_try_click_apply(
+        self, page: Page, container, is_split: bool,
+    ) -> bool:
+        """Find and click the Easy Apply button using all available strategies."""
+        apply_btn = await self._find_linkedin_easy_apply_button(
+            page, container, allow_page_fallback=not is_split,
+        )
+        if apply_btn is not None:
+            if await self._click_locator_robust(apply_btn):
+                return True
+
+        if container is not page:
+            if await self._force_click_easy_apply_by_text(page, container):
+                return True
+
+        apply_btn = await self._find_linkedin_easy_apply_button(
+            page, page, allow_page_fallback=True,
+        )
+        if apply_btn is not None:
+            if await self._click_locator_robust(apply_btn):
+                return True
+
+        if await self._force_click_easy_apply_by_text(page):
+            return True
+
+        return False
+
     async def _find_linkedin_easy_apply_button(
         self,
         page: Page,
@@ -248,17 +333,23 @@ class AutoApplyBot:
         selectors = [
             "button.jobs-apply-button",
             "button.jobs-apply-button--top-card",
+            "button.jobs-apply-button--top-card.jobs-apply-button",
+            "a.jobs-apply-button",
             "button[aria-label*='Easy Apply']",
+            "button[aria-label*='easy apply']",
             "button:has-text('Easy Apply')",
             "[data-control-name='jobdetails_topcard_inapply']",
         ]
 
         if container is not None and container is not page:
             for sel in selectors:
-                candidate = container.locator(sel).first
+                loc = container.locator(sel)
                 try:
-                    await candidate.wait_for(state="visible", timeout=5000)
-                    return candidate
+                    n = await loc.count()
+                    for i in range(min(n, 8)):
+                        candidate = loc.nth(i)
+                        if await self._is_visible(candidate, timeout=1200):
+                            return candidate
                 except Exception:
                     continue
 
@@ -800,6 +891,32 @@ class AutoApplyBot:
                 return False
             await locator.scroll_into_view_if_needed()
             await locator.click(timeout=2500)
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    async def _click_locator_robust(locator) -> bool:
+        """Click with force fallback for overlays / nested scroll containers (LinkedIn split JD)."""
+        try:
+            if not await locator.is_visible(timeout=2000):
+                return False
+            try:
+                if await locator.is_disabled():
+                    return False
+            except Exception:
+                pass
+            await locator.scroll_into_view_if_needed()
+        except Exception:
+            return False
+        for force in (False, True):
+            try:
+                await locator.click(timeout=4000, force=force)
+                return True
+            except Exception:
+                continue
+        try:
+            await locator.evaluate("(el) => el.click()")
             return True
         except Exception:
             return False
@@ -1559,20 +1676,23 @@ class AutoApplyBot:
 
     @staticmethod
     async def _is_split_linkedin_layout(page: Page) -> bool:
-        return await page.locator(
-            ".jobs-search-results-list, .jobs-search-results__list"
-        ).count() > 0
+        return await page.locator(_LI_SPLIT_LIST_SEL).count() > 0
 
     async def _get_linkedin_job_container(self, page: Page, target_url: str):
         if not await self._is_split_linkedin_layout(page):
             return page
 
+        target_id = self._extract_linkedin_job_id(target_url)
+        scoped = await self._linkedin_detail_panel_for_job(page, target_id)
+        if scoped is not None:
+            return scoped
+
         detail_panel = await self._fresh_linkedin_detail_panel(page)
         clicked_card = False
-        target_id = self._extract_linkedin_job_id(target_url)
         if target_id:
             cards = page.locator(
-                ".jobs-search-results__list-item, .job-card-container, [data-job-id]"
+                ".jobs-search-results__list-item, .job-card-container, "
+                ".scaffold-layout__list-item, [data-job-id]"
             )
             card_count = await cards.count()
             for idx in range(card_count):
@@ -1594,46 +1714,80 @@ class AutoApplyBot:
             detail_panel = await self._fresh_linkedin_detail_panel(page)
 
         if detail_panel is None:
-            cards = page.locator(".jobs-search-results__list-item, .job-card-container, [data-job-id]")
-            if await cards.count() > 0:
-                fallback_id = await self._locator_attribute(cards.first, "data-job-id")
-                await self._click_linkedin_card(page, cards.first, expected_job_id=fallback_id)
+            if target_id:
+                await page.goto(
+                    f"https://www.linkedin.com/jobs/search/?currentJobId={target_id}&f_AL=true&locale=en_US",
+                    wait_until="domcontentloaded",
+                )
+                await self._wait_for_linkedin_transition(page)
+                scoped = await self._linkedin_detail_panel_for_job(page, target_id)
+                if scoped is not None:
+                    return scoped
                 detail_panel = await self._fresh_linkedin_detail_panel(page)
+            else:
+                cards = page.locator(
+                    ".jobs-search-results__list-item, .job-card-container, "
+                    ".scaffold-layout__list-item, [data-job-id]"
+                )
+                if await cards.count() > 0:
+                    fallback_id = await self._locator_attribute(cards.first, "data-job-id")
+                    await self._click_linkedin_card(
+                        page, cards.first, expected_job_id=fallback_id
+                    )
+                    detail_panel = await self._fresh_linkedin_detail_panel(page)
+
+        scoped = await self._linkedin_detail_panel_for_job(page, target_id)
+        if scoped is not None:
+            return scoped
 
         if detail_panel is not None:
             return detail_panel
 
-        detail_panel = page.locator(
-            ".jobs-search__job-details, .jobs-details, .jobs-details__main-content"
-        ).first
+        detail_panel = page.locator(_LI_DETAIL_PANEL_SEL).first
         if await self._is_visible(detail_panel, timeout=2000):
             return detail_panel
         return page
 
     async def _fresh_linkedin_detail_panel(self, page: Page) -> Optional[Locator]:
-        detail_panel = page.locator(
-            ".jobs-search__job-details, .jobs-details, .jobs-details__main-content"
-        ).first
-        if await self._is_visible(detail_panel, timeout=2000):
+        detail_panel = page.locator(_LI_DETAIL_PANEL_SEL).first
+        if await self._is_visible(detail_panel, timeout=3000):
             return detail_panel
         return None
 
+    @staticmethod
+    async def _linkedin_detail_panel_for_job(page: Page, job_id: str) -> Optional[Locator]:
+        """Right-hand JD pane on jobs/search that matches this job id (avoids stale/hidden panes)."""
+        if not job_id:
+            return None
+        job_link = (
+            f'a[href*="/jobs/view/{job_id}"], a[href*="currentJobId={job_id}"]'
+        )
+        for root_sel in (
+            ".scaffold-layout__detail",
+            ".jobs-search__job-details",
+            ".jobs-details__main-content",
+            ".jobs-details",
+            ".jobs-search__job-details--wrapper",
+        ):
+            scoped = page.locator(root_sel).filter(has=page.locator(job_link)).first
+            if await AutoApplyBot._is_visible(scoped, timeout=1200):
+                return scoped
+        return None
+
     async def _prime_linkedin_detail_panel(self, page: Page, panel) -> None:
+        """
+        Keep the JD top card (Easy Apply) in view. Scrolling the pane down used to
+        hide the apply row on split search layouts.
+        """
         try:
             await panel.scroll_into_view_if_needed()
         except Exception:
             pass
-        for _ in range(2):
-            try:
-                await panel.evaluate("(el) => el.scrollBy(0, 900)")
-            except Exception:
-                break
-            await human_delay(0.2, 0.4)
         try:
-            await page.mouse.wheel(0, 1000)
+            await panel.evaluate("(el) => { el.scrollTop = 0; }")
         except Exception:
             pass
-        await human_delay(0.6, 1.0)
+        await human_delay(0.35, 0.6)
 
     async def _get_linkedin_modal(self, page: Page) -> Optional[Locator]:
         candidates = [
@@ -1819,12 +1973,8 @@ class AutoApplyBot:
         return " ".join(texts).strip()
 
     async def _current_linkedin_detail_title(self, page: Page) -> str:
-        detail_panel = page.locator(
-            ".jobs-search__job-details, .jobs-details, .jobs-details__main-content"
-        ).first
-        title = detail_panel.locator(
-            "h1, .job-details-jobs-unified-top-card__job-title, .jobs-unified-top-card__job-title"
-        ).first
+        detail_panel = page.locator(_LI_DETAIL_PANEL_SEL).first
+        title = detail_panel.locator(_LI_TITLE_SEL).first
         if await self._is_visible(title, timeout=500):
             try:
                 return " ".join((await title.inner_text()).strip().split())
@@ -1838,25 +1988,27 @@ class AutoApplyBot:
         previous_title: str,
         expected_job_id: str = "",
     ) -> None:
+        detail_css = (
+            ".scaffold-layout__detail, "
+            ".jobs-search__job-details, .jobs-details, .jobs-details__main-content"
+        )
+        title_css = (
+            "h1, h2.job-details-jobs-unified-top-card__job-title, "
+            ".job-details-jobs-unified-top-card__job-title, "
+            ".jobs-unified-top-card__job-title"
+        )
         try:
-            await page.wait_for_selector(
-                ".jobs-search__job-details, .jobs-details, .jobs-details__main-content",
-                timeout=5000,
-            )
+            await page.wait_for_selector(detail_css, timeout=5000)
         except Exception:
             pass
 
         try:
             await page.wait_for_function(
                 """
-                ({ oldTitle, expectedId }) => {
-                    const root = document.querySelector(
-                        '.jobs-search__job-details, .jobs-details, .jobs-details__main-content'
-                    );
+                ({ oldTitle, expectedId, detailCss, titleCss }) => {
+                    const root = document.querySelector(detailCss);
                     if (!root) return false;
-                    const titleEl = root.querySelector(
-                        'h1, .job-details-jobs-unified-top-card__job-title, .jobs-unified-top-card__job-title'
-                    );
+                    const titleEl = root.querySelector(titleCss);
                     const linkEl = root.querySelector("a[href*='/jobs/view/'], a[href*='currentJobId=']");
                     const title = (titleEl?.innerText || '').trim();
                     const href = linkEl?.getAttribute('href') || '';
@@ -1865,7 +2017,12 @@ class AutoApplyBot:
                     return !!title && title !== oldTitle;
                 }
                 """,
-                arg={"oldTitle": previous_title, "expectedId": expected_job_id},
+                arg={
+                    "oldTitle": previous_title,
+                    "expectedId": expected_job_id,
+                    "detailCss": detail_css,
+                    "titleCss": title_css,
+                },
                 timeout=7000,
             )
         except Exception:

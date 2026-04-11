@@ -14,6 +14,25 @@ WORK_MODE_FILTERS = {
     WorkMode.HYBRID: "3",
 }
 
+_LI_SPLIT_LIST_SEL = (
+    ".jobs-search-results-list, .jobs-search-results__list, "
+    ".scaffold-layout__list, .scaffold-layout__list-detail, "
+    ".jobs-search-two-pane__wrapper"
+)
+
+_LI_DETAIL_PANEL_SEL = (
+    ".scaffold-layout__detail, "
+    ".jobs-search__job-details, .jobs-details, .jobs-details__main-content, "
+    ".jobs-search__job-details--wrapper, .jobs-details__main-content--single-pane"
+)
+
+_LI_TITLE_SEL = (
+    "h1, h2.job-details-jobs-unified-top-card__job-title, "
+    ".job-details-jobs-unified-top-card__job-title, "
+    ".jobs-unified-top-card__job-title, "
+    ".t-24.job-details-jobs-unified-top-card__job-title"
+)
+
 
 class LinkedInCrawler(BaseCrawler):
     portal = JobPortal.LINKEDIN
@@ -44,51 +63,129 @@ class LinkedInCrawler(BaseCrawler):
         seen_urls: set[str] = set()
 
         for page_num in range(self.max_pages):
-            url = self._build_url(page_num)
-            await self._emit(f"Searching page {page_num + 1}: {url}")
-            await self._page.goto(url, wait_until="domcontentloaded")
-            await human_delay(2, 4)
+            try:
+                url = self._build_url(page_num)
+                await self._emit(f"Searching page {page_num + 1}: {url}")
+                await self._page.goto(url, wait_until="domcontentloaded")
+                await human_delay(2, 4)
+            except Exception as exc:
+                await self._emit(f"Page {page_num + 1} navigation failed: {exc}")
+                break
 
             await self._scroll_page()
-            is_split_layout = await self._is_split_layout()
 
-            cards = self._page.locator(
-                ".job-card-container, .jobs-search-results__list-item, "
-                "[data-job-id]"
-            )
-            card_count = await cards.count()
-            await self._emit(f"Page {page_num + 1}: found {card_count} card(s)")
+            raw_jobs = await self._extract_jobs_via_js()
+            await self._emit(f"Page {page_num + 1}: extracted {len(raw_jobs)} job(s) via JS")
 
-            for idx in range(card_count):
-                card = cards.nth(idx)
-                try:
-                    detail_panel = None
-                    if is_split_layout:
-                        detail_panel = await self._activate_split_layout_card(card)
-                        if detail_panel is None:
-                            continue
+            parsed_count = 0
+            for raw in raw_jobs:
+                title = (raw.get("title") or "").strip()
+                href = (raw.get("url") or "").strip()
+                if not title or not href:
+                    continue
+                if not href.startswith("http"):
+                    href = "https://www.linkedin.com" + href
+                href = self._canonical_job_url(href)
+                if not href or href in seen_urls:
+                    continue
 
-                    job = await self._parse_card(card, detail_panel)
-                    if job and job.url not in seen_urls:
-                        seen_urls.add(job.url)
-                        jobs.append(job)
-                except Exception as exc:
-                    log_event(
-                        "parse_error", portal=self.portal.value,
-                        detail=str(exc),
-                    )
+                company = (raw.get("company") or "Unknown").strip()
+                location = (raw.get("location") or "").strip()
+                work_mode = self._detect_work_mode(title + " " + location)
 
-            if card_count == 0:
+                seen_urls.add(href)
+                jobs.append(JobListing(
+                    title=title,
+                    company=company,
+                    location=location,
+                    url=href,
+                    portal=JobPortal.LINKEDIN,
+                    work_mode=work_mode,
+                    job_type="Full-time",
+                    description="",
+                ))
+                parsed_count += 1
+
+            await self._emit(f"Page {page_num + 1}: parsed {parsed_count} unique job(s)")
+            if parsed_count == 0 and len(raw_jobs) == 0:
                 break
 
         return jobs
 
+    async def _extract_jobs_via_js(self) -> list[dict]:
+        assert self._page is not None
+        return await self._page.evaluate("""
+        () => {
+            const jobs = [];
+            const cards = document.querySelectorAll(
+                '.job-card-container, .jobs-search-results__list-item, ' +
+                '.scaffold-layout__list-item, [data-job-id]'
+            );
+            for (const card of cards) {
+                let title = '';
+                let url = '';
+                let company = '';
+                let location = '';
+
+                const links = card.querySelectorAll('a[href*="/jobs/view/"]');
+                for (const link of links) {
+                    const text = (link.innerText || '').trim();
+                    if (text && text.length > 2) {
+                        title = title || text;
+                        url = url || link.getAttribute('href') || '';
+                    }
+                }
+                if (!title) {
+                    const strong = card.querySelector('strong');
+                    if (strong) title = (strong.innerText || '').trim();
+                }
+                if (!title) {
+                    const titleEl = card.querySelector(
+                        '.job-card-list__title, .artdeco-entity-lockup__title, ' +
+                        '[class*="job-card"] a'
+                    );
+                    if (titleEl) title = (titleEl.innerText || '').trim();
+                }
+                if (!url) {
+                    const anyLink = card.querySelector('a[href*="/jobs/view/"]');
+                    if (anyLink) url = anyLink.getAttribute('href') || '';
+                }
+                if (!url) {
+                    const jobId = card.getAttribute('data-job-id') ||
+                        card.closest('[data-job-id]')?.getAttribute('data-job-id');
+                    if (jobId) url = '/jobs/view/' + jobId + '/';
+                }
+
+                const companyEl = card.querySelector(
+                    '.job-card-container__primary-description, ' +
+                    '.job-card-container__company-name, ' +
+                    '.artdeco-entity-lockup__subtitle, ' +
+                    '[class*="company-name"], [class*="subtitle"]'
+                );
+                if (companyEl) company = (companyEl.innerText || '').trim();
+
+                const locationEl = card.querySelector(
+                    '.job-card-container__metadata-item, ' +
+                    '.artdeco-entity-lockup__caption, ' +
+                    '[class*="location"], [class*="metadata"]'
+                );
+                if (locationEl) location = (locationEl.innerText || '').trim();
+
+                if (title && url) {
+                    // Clean title: take first line, remove duplicates
+                    const lines = title.split('\\n').map(l => l.trim()).filter(Boolean);
+                    title = lines[0] || title;
+                    jobs.push({ title, url, company, location });
+                }
+            }
+            return jobs;
+        }
+        """)
+
     async def _scroll_page(self) -> None:
         """Scroll the results list to trigger lazy loading."""
         assert self._page is not None
-        results_list = self._page.locator(
-            ".jobs-search-results-list, .jobs-search-results__list"
-        ).first
+        results_list = self._page.locator(_LI_SPLIT_LIST_SEL).first
         for _ in range(5):
             try:
                 if await results_list.is_visible(timeout=500):
@@ -102,20 +199,33 @@ class LinkedInCrawler(BaseCrawler):
     async def _parse_card(self, card, detail_panel=None) -> JobListing | None:
         title_el = card.locator(
             ".job-card-list__title, .job-card-container__link, "
-            "a[data-control-name='job_card_title']"
+            "a[data-control-name='job_card_title'], "
+            "[class*='job-card'] a, a[href*='/jobs/view/'], "
+            "strong, .artdeco-entity-lockup__title"
         ).first
         title = await self._locator_text(title_el)
         if not title and detail_panel is not None:
             title = await self._locator_text(
-                detail_panel.locator(
-                    "h1, .job-details-jobs-unified-top-card__job-title, "
-                    ".jobs-unified-top-card__job-title"
-                ).first
+                detail_panel.locator(_LI_TITLE_SEL).first
             )
+        if not title:
+            all_links = card.locator("a")
+            link_count = await all_links.count()
+            for link_idx in range(min(link_count, 5)):
+                link = all_links.nth(link_idx)
+                link_text = await self._locator_text(link)
+                link_href = await self._locator_attribute(link, "href")
+                if link_text and len(link_text) > 3 and "/jobs/view/" in (link_href or ""):
+                    title = link_text
+                    title_el = link
+                    break
         if not title:
             return None
 
         href = await self._locator_attribute(title_el, "href")
+        if not href:
+            card_link = card.locator("a[href*='/jobs/view/'], a[href*='currentJobId=']").first
+            href = await self._locator_attribute(card_link, "href")
         if detail_panel is not None:
             panel_link = detail_panel.locator(
                 "a[href*='/jobs/view/'], a[href*='currentJobId=']"
@@ -126,6 +236,10 @@ class LinkedInCrawler(BaseCrawler):
             href = "https://www.linkedin.com" + href
         if not href:
             job_id = await self._locator_attribute(card, "data-job-id")
+            if not job_id:
+                job_id = await card.evaluate(
+                    "(el) => el.closest('[data-job-id]')?.getAttribute('data-job-id') || ''"
+                ) if await self._locator_text(card) else ""
             if job_id:
                 href = f"https://www.linkedin.com/jobs/view/{job_id}/"
         if not href and self._page is not None:
@@ -137,7 +251,8 @@ class LinkedInCrawler(BaseCrawler):
         company = await self._locator_text(card.locator(
             ".job-card-container__primary-description, "
             ".job-card-container__company-name, "
-            ".artdeco-entity-lockup__subtitle"
+            ".artdeco-entity-lockup__subtitle, "
+            "[class*='company'], [class*='subtitle']"
         ).first)
         if not company and detail_panel is not None:
             company = await self._locator_text(
@@ -147,11 +262,21 @@ class LinkedInCrawler(BaseCrawler):
                     ".topcard__org-name-link, .job-details-jobs-unified-top-card__company-name a"
                 ).first
             )
+        if not company:
+            spans = card.locator("span, div")
+            span_count = await spans.count()
+            for span_idx in range(min(span_count, 10)):
+                span = spans.nth(span_idx)
+                text = await self._locator_text(span)
+                if text and text != title and len(text) < 80 and "/" not in text:
+                    company = text
+                    break
         company = company or "Unknown"
 
         location = await self._locator_text(card.locator(
             ".job-card-container__metadata-item, "
-            ".artdeco-entity-lockup__caption"
+            ".artdeco-entity-lockup__caption, "
+            "[class*='location'], [class*='metadata']"
         ).first)
         if not location and detail_panel is not None:
             location = await self._locator_text(
@@ -171,12 +296,12 @@ class LinkedInCrawler(BaseCrawler):
                 ).first
             )
 
-        work_mode = self._detect_work_mode(title + " " + location)
+        work_mode = self._detect_work_mode(title + " " + (location or ""))
 
         return JobListing(
             title=title,
             company=company,
-            location=location,
+            location=location or "",
             url=href,
             portal=JobPortal.LINKEDIN,
             work_mode=work_mode,
@@ -203,9 +328,7 @@ class LinkedInCrawler(BaseCrawler):
 
     async def _is_split_layout(self) -> bool:
         assert self._page is not None
-        return await self._page.locator(
-            ".jobs-search-results-list, .jobs-search-results__list"
-        ).count() > 0
+        return await self._page.locator(_LI_SPLIT_LIST_SEL).count() > 0
 
     async def _activate_split_layout_card(self, card):
         assert self._page is not None
@@ -238,8 +361,7 @@ class LinkedInCrawler(BaseCrawler):
         assert self._page is not None
         try:
             await self._page.wait_for_selector(
-                ".jobs-search__job-details, .jobs-details, .jobs-details__main-content",
-                timeout=5000,
+                _LI_DETAIL_PANEL_SEL, timeout=5000,
             )
         except Exception:
             pass
@@ -252,13 +374,11 @@ class LinkedInCrawler(BaseCrawler):
             await self._page.wait_for_function(
                 """
                 ({ oldTitle, expectedId }) => {
-                    const root = document.querySelector(
-                        '.jobs-search__job-details, .jobs-details, .jobs-details__main-content'
-                    );
+                    const detailSel = '.scaffold-layout__detail, .jobs-search__job-details, .jobs-details, .jobs-details__main-content';
+                    const titleSel = 'h1, h2.job-details-jobs-unified-top-card__job-title, .job-details-jobs-unified-top-card__job-title, .jobs-unified-top-card__job-title';
+                    const root = document.querySelector(detailSel);
                     if (!root) return false;
-                    const titleEl = root.querySelector(
-                        'h1, .job-details-jobs-unified-top-card__job-title, .jobs-unified-top-card__job-title'
-                    );
+                    const titleEl = root.querySelector(titleSel);
                     const linkEl = root.querySelector("a[href*='/jobs/view/'], a[href*='currentJobId=']");
                     const title = (titleEl?.innerText || '').trim();
                     const href = linkEl?.getAttribute('href') || '';
@@ -276,9 +396,7 @@ class LinkedInCrawler(BaseCrawler):
 
     async def _get_detail_panel(self):
         assert self._page is not None
-        panel = self._page.locator(
-            ".jobs-search__job-details, .jobs-details, .jobs-details__main-content"
-        ).first
+        panel = self._page.locator(_LI_DETAIL_PANEL_SEL).first
         try:
             if await panel.is_visible(timeout=1000):
                 return panel
@@ -290,9 +408,7 @@ class LinkedInCrawler(BaseCrawler):
         panel = await self._get_detail_panel()
         if panel is None:
             return ""
-        title = panel.locator(
-            "h1, .job-details-jobs-unified-top-card__job-title, .jobs-unified-top-card__job-title"
-        ).first
+        title = panel.locator(_LI_TITLE_SEL).first
         return await self._locator_text(title)
 
     @staticmethod

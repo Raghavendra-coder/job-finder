@@ -18,14 +18,14 @@ def compute_match_score(
     job_skills = set(extract_required_skills(job.description))
 
     if not job_skills:
-        # LinkedIn cards may not include a JD snippet. Fall back to the user's target
-        # skill set extracted from the search prompt/JD.
+        title_words = {w.lower() for w in job.title.split() if len(w) > 2}
         if target_skills:
-            overlap = resume_skills & target_skills
-            return min(len(overlap) / max(len(target_skills), 1), 1.0)
+            skill_overlap = resume_skills & target_skills
+            skill_score = len(skill_overlap) / max(len(target_skills), 1)
+            title_overlap = title_words & resume_skills
+            title_score = len(title_overlap) / max(len(title_words), 1)
+            return min(max(skill_score, title_score, 0.5 * skill_score + 0.5 * title_score), 1.0)
 
-        # Final fallback: title keyword overlap.
-        title_words = {w.lower() for w in job.title.split()}
         overlap = title_words & resume_skills
         return min(len(overlap) / max(len(title_words), 1), 1.0)
 
@@ -47,8 +47,10 @@ def filter_and_score_jobs(
     jobs: list[JobListing],
     threshold: float = 0.5,
     search_context: str = "",
-) -> list[JobListing]:
+) -> tuple[list[JobListing], list[JobListing]]:
+    """Return (matched, skipped) lists after scoring each job."""
     scored: list[JobListing] = []
+    skipped: list[JobListing] = []
     target_skills = set(extract_required_skills(search_context))
     for job in jobs:
         score = compute_match_score(resume, job, target_skills=target_skills)
@@ -59,8 +61,10 @@ def filter_and_score_jobs(
                 "MATCH %.2f — %s @ %s", score, job.title, job.company,
             )
         else:
-            logger.debug(
-                "SKIP  %.2f — %s @ %s", score, job.title, job.company,
+            skipped.append(job)
+            logger.info(
+                "SKIP  %.2f — %s @ %s (threshold %.2f)",
+                score, job.title, job.company, threshold,
             )
     scored.sort(key=lambda j: j.match_score, reverse=True)
-    return scored
+    return scored, skipped

@@ -48,7 +48,7 @@ BROWSER_CONNECT_OVER_CDP: bool = os.getenv("BROWSER_CONNECT_OVER_CDP", "false").
 CHROME_CDP_URL: str = os.getenv("CHROME_CDP_URL", "http://localhost:9222")
 
 # --- Matching ----------------------------------------------------------------
-MATCH_THRESHOLD: float = float(os.getenv("MATCH_THRESHOLD", "0.5"))
+MATCH_THRESHOLD: float = float(os.getenv("MATCH_THRESHOLD", "0.3"))
 
 # --- Rate limiting -----------------------------------------------------------
 MIN_DELAY: float = float(os.getenv("MIN_DELAY", "2"))

@@ -34,7 +34,7 @@ def main() -> None:
         "backend.main:app",
         host=HOST,
         port=PORT,
-        reload=True,
+        reload=False,
     )
 
 
