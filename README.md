@@ -1,3 +1,7 @@
+cd C:\Users\Prashin\Desktop\PROJECTS\job-finder
+.\venv\Scripts\python.exe -m backend.main
+
+
 # AI Job Search Automation System
 
 An AI-powered system that crawls job portals (LinkedIn, Indeed, Naukri), matches jobs to your resume, and automatically fills applications using AI-generated answers.

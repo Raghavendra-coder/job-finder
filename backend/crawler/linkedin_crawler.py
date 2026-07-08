@@ -312,7 +312,7 @@ class LinkedInCrawler(BaseCrawler):
     @staticmethod
     async def _is_easy_apply_card(card) -> bool:
         text = (await card.inner_text()).lower()
-        return "easy apply" in text
+        return "apply" in text or "easy apply" in text
 
     @staticmethod
     def _canonical_job_url(url: str) -> str:

@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import math
 import re
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, File, Form, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from backend.ai.jd_analyzer import (
     analyze_job_description,
@@ -16,7 +19,11 @@ from backend.ai.jd_analyzer import (
     extract_role_keywords,
 )
 from backend.ai.job_matcher import filter_and_score_jobs
-from backend.auth.session_manager import close_browser
+from backend.auth.session_manager import (
+    get_authenticated_portals,
+    login_portals,
+    release_portal_sessions,
+)
 from backend.config import MATCH_THRESHOLD, UPLOADS_DIR
 from backend.crawler.auto_apply import AutoApplyBot
 from backend.crawler.indeed_crawler import IndeedCrawler
@@ -224,6 +231,37 @@ async def analyze_jd(job_description: str = Form(...)):
     return {"analysis": analysis}
 
 
+@router.post("/login-portals")
+async def login_to_portals(portals: str = Form("linkedin")):
+    if _active_task and not _active_task.done():
+        return JSONResponse(
+            {"error": "A search is already running. Stop it before logging in."},
+            status_code=409,
+        )
+
+    portal_list = [JobPortal(p.strip()) for p in portals.split(",") if p.strip()]
+    if not portal_list:
+        return JSONResponse({"error": "Select at least one portal"}, status_code=400)
+
+    logs: list[str] = []
+
+    def _on_status(msg: str) -> None:
+        logs.append(msg)
+
+    results = await login_portals(portal_list, on_status=_on_status)
+    return {
+        "results": {portal.value: ok for portal, ok in results.items()},
+        "all_success": all(results.values()),
+        "logs": logs,
+        "authenticated": [p.value for p in get_authenticated_portals()],
+    }
+
+
+@router.get("/login-status")
+async def login_status():
+    return {"authenticated": [p.value for p in get_authenticated_portals()]}
+
+
 @router.post("/start-search")
 async def start_search(
     job_description: str = Form(...),
@@ -344,11 +382,30 @@ async def _run_search(
     resume_path: Path,
 ) -> None:
     global _active_task
-    session.status = "running"
+    session.status = "logging_in"
     session.infinite_search = request.infinite_search
     bot: AutoApplyBot | None = None
 
     try:
+        session.logs.append(
+            "Step 1: Log in to job portals — complete sign-in in each browser window"
+        )
+        login_results = await login_portals(
+            request.portals,
+            on_status=lambda msg, s=session: s.logs.append(msg),
+        )
+        failed_portals = [portal for portal, ok in login_results.items() if not ok]
+        if failed_portals:
+            session.status = "error"
+            session.logs.append(
+                "Login required before search can continue. Failed: "
+                + ", ".join(portal.value for portal in failed_portals)
+            )
+            return
+
+        session.logs.append("All portals logged in — starting job search")
+        session.status = "running"
+
         resume_data = parse_resume(resume_path)
         session.logs.append("Resume parsed")
 
@@ -441,7 +498,7 @@ async def _run_search(
             except Exception:
                 pass
         try:
-            await close_browser()
+            await release_portal_sessions()
         except Exception:
             pass
         current_task = asyncio.current_task()
@@ -477,7 +534,7 @@ async def stop_search():
         _active_task.cancel()
         _active_task = None
         try:
-            await close_browser()
+            await release_portal_sessions()
         except Exception:
             pass
         return {"message": "Search stopped"}
@@ -493,6 +550,48 @@ async def get_logs():
 async def clear_all_logs():
     clear_logs()
     return {"message": "Logs cleared"}
+
+
+@router.get("/applications/export")
+async def export_applications_csv():
+    """Export all application records as a CSV download."""
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "Job Title",
+        "Company",
+        "Portal",
+        "Score",
+        "Status",
+        "URL",
+        "Location",
+        "Work Mode",
+        "Error",
+        "Session ID",
+    ])
+
+    for session in _sessions.values():
+        for app in session.applications:
+            job = app.job
+            writer.writerow([
+                job.title,
+                job.company,
+                job.portal.value,
+                f"{job.match_score * 100:.0f}%",
+                app.status,
+                job.url,
+                job.location,
+                job.work_mode.value,
+                app.error or "",
+                session.session_id,
+            ])
+
+    filename = f"applications-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.csv"
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/dashboard")

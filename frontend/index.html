@@ -133,6 +133,8 @@
     .btn-primary { background: var(--primary); color: #fff; }
     .btn-primary:hover { background: var(--primary-hover); }
     .btn-primary:disabled { opacity: .5; cursor: not-allowed; }
+    .btn-secondary { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
+    .btn-secondary:hover { border-color: var(--primary); }
     .btn-danger { background: var(--error); color: #fff; }
     .btn-danger:hover { background: #dc2626; }
     .btn-sm { padding: 8px 18px; font-size: .85rem; }
@@ -288,6 +290,9 @@
               <label><input type="checkbox" name="portal" value="indeed" /> Indeed</label>
               <label><input type="checkbox" name="portal" value="naukri" /> Naukri</label>
             </div>
+            <div id="portal-login-status" class="field-help" style="margin-top: 8px;">
+              Sign in to portals before starting search (browser windows will stay open until you finish).
+            </div>
           </div>
 
 	          <div class="field-group">
@@ -335,6 +340,9 @@
           </div>
 
           <div class="btn-group">
+            <button class="btn btn-secondary btn-sm" id="btn-login" onclick="loginPortals()">
+              Login to Portals
+            </button>
             <button class="btn btn-primary" id="btn-start" onclick="startSearch()" disabled>
               Start Job Search
             </button>
@@ -359,7 +367,12 @@
 
         <!-- Applications Table -->
         <div class="card mt-24" id="app-table-card">
-          <h2><span class="icon">&#128203;</span> Applications</h2>
+          <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:18px;">
+            <h2 style="margin-bottom:0;"><span class="icon">&#128203;</span> Applications</h2>
+            <button class="btn btn-secondary btn-sm" id="btn-export" onclick="exportApplications()">
+              Export CSV
+            </button>
+          </div>
           <div style="overflow-x:auto;">
             <table class="app-table">
               <thead>
@@ -387,6 +400,7 @@
     let pollInterval = null;
     let resumePath = '';
     let parsedResumeData = null;
+    let loggedInPortals = [];
 
     function normalizePhone(raw) {
       return (raw || '').replace(/\D/g, '').slice(0, 10);
@@ -540,6 +554,80 @@
       }
     }
 
+    function getSelectedPortals() {
+      return [...document.querySelectorAll('input[name="portal"]:checked')].map(el => el.value);
+    }
+
+    function renderPortalLoginStatus() {
+      const box = document.getElementById('portal-login-status');
+      const selected = getSelectedPortals();
+      if (!selected.length) {
+        box.textContent = 'Select at least one portal.';
+        return;
+      }
+      const lines = selected.map((portal) => {
+        const loggedIn = loggedInPortals.includes(portal);
+        return `${portal}: ${loggedIn ? 'logged in' : 'not logged in'}`;
+      });
+      box.textContent = lines.join(' · ');
+    }
+
+    async function refreshLoginStatus() {
+      try {
+        const res = await fetch(`${API}/login-status`);
+        if (!res.ok) return;
+        const data = await res.json();
+        loggedInPortals = data.authenticated || [];
+        renderPortalLoginStatus();
+      } catch { /* ignore */ }
+    }
+
+    async function loginPortals() {
+      const portals = getSelectedPortals();
+      if (!portals.length) {
+        alert('Select at least one portal.');
+        return;
+      }
+
+      const btn = document.getElementById('btn-login');
+      btn.disabled = true;
+      btn.textContent = 'Waiting for login...';
+      setStatus('logging_in');
+      addLog('Opening browser windows — complete sign-in for each portal');
+
+      const form = new FormData();
+      form.append('portals', portals.join(','));
+
+      try {
+        const res = await fetch(`${API}/login-portals`, { method: 'POST', body: form });
+        const data = await res.json();
+
+        if (!res.ok) {
+          addLog(data.error || 'Login failed to start');
+          setStatus('error');
+          return;
+        }
+
+        (data.logs || []).forEach(msg => addLog(msg));
+        loggedInPortals = data.authenticated || [];
+        renderPortalLoginStatus();
+
+        if (data.all_success) {
+          addLog('All selected portals are logged in');
+          setStatus('idle');
+        } else {
+          addLog('Some portals still need login — try again after signing in');
+          setStatus('error');
+        }
+      } catch (err) {
+        addLog('Login error: ' + err.message);
+        setStatus('error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Login to Portals';
+      }
+    }
+
     async function startSearch() {
       const validationErrors = updateFormValidation(true);
       if (validationErrors.length) return;
@@ -651,10 +739,15 @@
 
         renderApplications(data.applications || []);
 
-	        if (data.status === 'completed' || data.status === 'error' || data.status === 'stopped') {
-	          setStatus(data.status);
-	          stopPolling();
-	        }
+        if (data.status === 'logging_in') {
+          setStatus('logging_in');
+        }
+
+        if (data.status === 'completed' || data.status === 'error' || data.status === 'stopped') {
+          setStatus(data.status);
+          stopPolling();
+          refreshLoginStatus();
+        }
       } catch { /* ignore poll errors */ }
     }
 
@@ -678,10 +771,46 @@
         el.addEventListener('change', () => updateFormValidation(true));
       });
       document.querySelectorAll('input[name="workmode"], input[name="portal"]').forEach((el) => {
-        el.addEventListener('change', () => updateFormValidation(true));
+        el.addEventListener('change', () => {
+          updateFormValidation(true);
+          renderPortalLoginStatus();
+        });
       });
       updateFormValidation();
+      refreshLoginStatus();
     });
+
+    async function exportApplications() {
+      const btn = document.getElementById('btn-export');
+      btn.disabled = true;
+      btn.textContent = 'Exporting...';
+
+      try {
+        const res = await fetch(`${API}/applications/export`);
+        if (!res.ok) {
+          alert('Export failed. Please try again.');
+          return;
+        }
+
+        const blob = await res.blob();
+        const disposition = res.headers.get('Content-Disposition') || '';
+        const match = disposition.match(/filename="([^"]+)"/);
+        const filename = match ? match[1] : `applications-${new Date().toISOString().slice(0, 10)}.csv`;
+
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        link.click();
+        URL.revokeObjectURL(url);
+        addLog(`Exported applications to ${filename}`);
+      } catch (err) {
+        alert('Export error: ' + err.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Export CSV';
+      }
+    }
 
     function renderApplications(apps) {
       const tbody = document.getElementById('app-table-body');
@@ -712,6 +841,10 @@
 
       dot.className = 'status-indicator';
       switch (status) {
+        case 'logging_in':
+          dot.classList.add('active');
+          text.textContent = 'Waiting for login...';
+          break;
         case 'running':
           dot.classList.add('active');
           text.textContent = 'Running...';

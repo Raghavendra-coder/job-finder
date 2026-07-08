@@ -9,10 +9,10 @@ from playwright.async_api import BrowserContext, Frame, Locator, Page
 
 from backend.ai.answer_generator import generate_answer
 from backend.auth.session_manager import (
-    create_context,
     ensure_logged_in,
+    get_portal_context,
     human_delay,
-    is_managed_context,
+    is_portal_authenticated,
     save_cookies,
 )
 from backend.config import APPLICANT_EMAIL, APPLICANT_NAME, APPLICANT_PHONE
@@ -79,8 +79,11 @@ class AutoApplyBot:
         if portal in self._contexts:
             return self._contexts[portal]
 
-        ctx = await create_context(portal)
+        ctx = await get_portal_context(portal)
         self._contexts[portal] = ctx
+
+        if is_portal_authenticated(portal):
+            return ctx
 
         login_page = await ctx.new_page()
         try:
@@ -89,22 +92,15 @@ class AutoApplyBot:
             if not logged_in:
                 raise RuntimeError(f"Failed to log in to {portal.value}")
             self._logged_in.add(portal)
-            if is_managed_context(ctx):
-                await save_cookies(ctx, portal)
+            await save_cookies(ctx, portal)
             await self._emit(f"Login verified for {portal.value}")
         finally:
-            await login_page.close()
+            if not login_page.is_closed():
+                await login_page.close()
 
         return ctx
 
     async def close(self) -> None:
-        for portal, ctx in list(self._contexts.items()):
-            try:
-                if is_managed_context(ctx):
-                    await save_cookies(ctx, portal)
-                    await ctx.close()
-            except Exception:
-                pass
         self._contexts.clear()
         self._logged_in.clear()
 
@@ -185,7 +181,7 @@ class AutoApplyBot:
                 clicked = await self._linkedin_try_click_apply(page, page, is_split=False)
 
         if not clicked:
-            await self._emit("No Easy Apply button found — external application")
+            await self._emit("No LinkedIn Apply button found — external application")
             app_log.error = "external_application"
             return False
 
@@ -300,7 +296,7 @@ class AutoApplyBot:
     async def _linkedin_try_click_apply(
         self, page: Page, container, is_split: bool,
     ) -> bool:
-        """Find and click the Easy Apply button using all available strategies."""
+        """Find and click the LinkedIn Apply button using all available strategies."""
         apply_btn = await self._find_linkedin_easy_apply_button(
             page, container, allow_page_fallback=not is_split,
         )
@@ -331,13 +327,17 @@ class AutoApplyBot:
         allow_page_fallback: bool = True,
     ):
         selectors = [
+            "#jobs-apply-button-id",
+            "button[data-live-test-job-apply-button]",
             "button.jobs-apply-button",
-            "button.jobs-apply-button--top-card",
-            "button.jobs-apply-button--top-card.jobs-apply-button",
-            "a.jobs-apply-button",
+            ".jobs-apply-button--top-card button.jobs-apply-button",
+            "button[aria-label*='LinkedIn Apply']",
+            "button[aria-label*='Apply to']",
             "button[aria-label*='Easy Apply']",
             "button[aria-label*='easy apply']",
+            "button:has-text('Apply')",
             "button:has-text('Easy Apply')",
+            "a.jobs-apply-button",
             "[data-control-name='jobdetails_topcard_inapply']",
         ]
 
@@ -367,39 +367,59 @@ class AutoApplyBot:
 
         for root in search_roots:
             try:
-                role_btn = root.get_by_role("button", name=re.compile("easy apply", re.I)).first
+                role_btn = root.get_by_role(
+                    "button",
+                    name=re.compile(r"^apply$|easy apply|linkedin apply", re.I),
+                ).first
                 if await self._is_visible(role_btn, timeout=1200):
                     return role_btn
             except Exception:
                 continue
 
         for root in search_roots:
-            btn = await self._find_button(root, ["Easy Apply"], page=page)
+            btn = await self._find_button(root, ["Apply", "Easy Apply"], page=page)
             if btn is not None:
                 return btn
 
         return None
 
     @staticmethod
+    def _is_linkedin_apply_button_js() -> str:
+        return """
+        (el) => {
+          if (!el) return false;
+          const text = (el.innerText || el.textContent || "").toLowerCase().trim();
+          const aria = (el.getAttribute("aria-label") || "").toLowerCase();
+          if (el.id === "jobs-apply-button-id") return true;
+          if (el.hasAttribute("data-live-test-job-apply-button")) return true;
+          if (el.classList && el.classList.contains("jobs-apply-button")) return true;
+          if (aria.includes("linkedin apply") || aria.includes("apply to")) return true;
+          if (text === "apply" || text === "easy apply") return true;
+          return false;
+        }
+        """
+
+    @staticmethod
     async def _force_click_easy_apply_by_text(page: Page, container=None) -> bool:
-        script = """
-        (root) => {
+        is_apply_btn = AutoApplyBot._is_linkedin_apply_button_js()
+        script = f"""
+        (root) => {{
+          const isApplyButton = {is_apply_btn};
           const nodes = Array.from(root.querySelectorAll("button, a, [role='button']"));
-          const target = nodes.find((el) => {
-            const text = (el.innerText || el.textContent || "").toLowerCase().trim();
-            if (!text.includes("easy apply")) return false;
+          const target = nodes.find((el) => {{
+            if (!isApplyButton(el)) return false;
             const style = window.getComputedStyle(el);
             const rect = el.getBoundingClientRect();
             const visible = rect.width > 0 && rect.height > 0 &&
               style.visibility !== "hidden" && style.display !== "none" &&
               !el.disabled;
             return visible;
-          });
+          }});
           if (!target) return false;
-          target.scrollIntoView({ block: "center", inline: "center" });
+          target.scrollIntoView({{ block: "center", inline: "center" }});
           target.click();
           return true;
-        }
+        }}
         """
         if container is not None:
             try:
@@ -408,26 +428,26 @@ class AutoApplyBot:
                 pass
         try:
             return bool(await page.evaluate(
-                """
-                () => {
+                f"""
+                () => {{
+                  const isApplyButton = {is_apply_btn};
                   const nodes = Array.from(
                     document.querySelectorAll("button, a, [role='button']")
                   );
-                  const target = nodes.find((el) => {
-                    const text = (el.innerText || el.textContent || "").toLowerCase().trim();
-                    if (!text.includes("easy apply")) return false;
+                  const target = nodes.find((el) => {{
+                    if (!isApplyButton(el)) return false;
                     const style = window.getComputedStyle(el);
                     const rect = el.getBoundingClientRect();
                     const visible = rect.width > 0 && rect.height > 0 &&
                       style.visibility !== "hidden" && style.display !== "none" &&
                       !el.disabled;
                     return visible;
-                  });
+                  }});
                   if (!target) return false;
-                  target.scrollIntoView({ block: "center", inline: "center" });
+                  target.scrollIntoView({{ block: "center", inline: "center" }});
                   target.click();
                   return true;
-                }
+                }}
                 """
             ))
         except Exception:

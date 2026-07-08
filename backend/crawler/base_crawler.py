@@ -6,10 +6,10 @@ from typing import Callable, Optional
 from playwright.async_api import BrowserContext, Page
 
 from backend.auth.session_manager import (
-    create_context,
     ensure_logged_in,
+    get_portal_context,
     human_delay,
-    is_managed_context,
+    is_portal_authenticated,
     save_cookies,
 )
 from backend.logger import log_event, logger
@@ -43,9 +43,14 @@ class BaseCrawler(abc.ABC):
         logger.info("[%s] %s", self.portal.value, msg)
 
     async def setup(self) -> bool:
-        self._context = await create_context(self.portal)
-        self._page = await self._context.new_page()
+        self._context = await get_portal_context(self.portal)
 
+        if is_portal_authenticated(self.portal):
+            self._page = await self._context.new_page()
+            await self._emit("Using existing login session")
+            return True
+
+        self._page = await self._context.new_page()
         await self._emit("Logging in…")
         logged_in = await ensure_logged_in(self._page, self.portal)
         if not logged_in:
@@ -63,12 +68,13 @@ class BaseCrawler(abc.ABC):
         """Scrape job listings from the portal."""
 
     async def teardown(self) -> None:
-        if self._context:
-            if is_managed_context(self._context):
-                await save_cookies(self._context, self.portal)
-                await self._context.close()
-            self._context = None
+        if self._page:
+            try:
+                await self._page.close()
+            except Exception:
+                pass
             self._page = None
+        self._context = None
 
     async def run(self) -> list[JobListing]:
         try:
